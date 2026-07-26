@@ -40,4 +40,16 @@ interface ILineageRegistryMergeable {
     /// @notice Emitted when `duplicateId` is merged into `survivorId`. The duplicate is burned
     ///         in the same transaction and its offspring now point at the survivor.
     event NodesMerged(uint256 indexed survivorId, uint256 indexed duplicateId);
+
+    /// @notice Where a merged-away token went: the survivor that `duplicateId` was folded into,
+    ///         or 0 if it was never merged.
+    ///
+    ///         A merge burns the duplicate, so every off-chain record, pedigree certificate or
+    ///         marketplace listing still naming that ID becomes a dangling reference. This is
+    ///         the forwarding address that lets such a reference be resolved rather than lost.
+    ///
+    /// @dev    Survives the burn on purpose — it is the one piece of the duplicate that must
+    ///         outlive it. Chains are possible: if the survivor is itself later merged away,
+    ///         follow `mergedInto` repeatedly until it returns 0.
+    function mergedInto(uint256 duplicateId) external view returns (uint256 survivorId);
 }

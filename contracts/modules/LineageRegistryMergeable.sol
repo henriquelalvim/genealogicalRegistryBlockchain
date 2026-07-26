@@ -19,6 +19,15 @@ import "../interfaces/ILineageRegistryMergeable.sol";
  *         data.
  */
 abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, LineageRegistryOffspring {
+    /// @dev duplicateId → survivorId. Written at merge time and never cleared: it is the
+    ///      forwarding address for a token that no longer exists.
+    mapping(uint256 => uint256) private _mergedInto;
+
+    /// @inheritdoc ILineageRegistryMergeable
+    function mergedInto(uint256 duplicateId) external view returns (uint256 survivorId) {
+        return _mergedInto[duplicateId];
+    }
+
     /// @dev Domain follow-up after the graph has been merged. The duplicate is already burned by
     ///      the time this runs, but the deriving contract's own mappings for it are untouched —
     ///      that is exactly what this hook is for. Default: nothing.
@@ -88,6 +97,9 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
 
         _burn(duplicateId);
         delete _nodes[duplicateId];
+
+        // Deliberately outlives the burned token: stale references resolve forward through this.
+        _mergedInto[duplicateId] = survivorId;
 
         emit NodesMerged(survivorId, duplicateId);
     }
