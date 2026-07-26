@@ -1,4 +1,23 @@
-# Remix compiler artifacts
+# ── Node ──────────────────────────────────────────────────────────────────
+node_modules/
+dist/
+*.log
+npm-debug.log*
+
+# ── Hardhat ───────────────────────────────────────────────────────────────
+/artifacts
+/cache
+/types
+/coverage
+.gas-snapshot
+/snapshots
+
+# Ignition records real deployment addresses per chain. Local runs are throwaway;
+# anything deployed to a public network is worth committing, so ignore only the
+# in-memory/local chain IDs.
+/ignition/deployments/chain-31337/
+
+# ── Remix compiler artifacts (kept: the contracts are still editable in Remix) ──
 **/artifacts/
 **/artifacts/**
 
@@ -6,10 +25,11 @@
 deps/
 states/
 
-# Debug info
+# ── Debug info ────────────────────────────────────────────────────────────
 *.dbg.json
 *.tsbuildinfo
 
-# Optional
+# ── Secrets ───────────────────────────────────────────────────────────────
 .env
-.env.local
+.env.*
+!.env.example
