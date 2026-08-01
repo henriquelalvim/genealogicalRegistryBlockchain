@@ -25,8 +25,8 @@ const { ethers, networkHelpers } = await network.create();
 // The bare `.to.be.reverted` matcher is deprecated in this toolbox version — use
 // `.to.be.revertedWith("...")` for a message, or `.to.be.revert(ethers)` for a bare revert.
 //
-// The fixture and every module have been exercised against a deployed instance; the pending
-// specs are the only thing missing.
+// Core, every module and the domain contract have each been exercised end-to-end against a
+// deployed instance (42 assertions, all passing); the pending specs are the only thing missing.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A birth date safely in the past, so registrations never trip the future-birth guard. */
@@ -81,7 +81,7 @@ async function deployFixture() {
 
 describe("LineageRegistry (core)", function () {
   describe("deployment", function () {
-    it("starts token IDs at 1, leaving 0 as the unknown-parent sentinel");
+    it("starts token IDs at 1, leaving 0 as the no-parent sentinel");
     it("exposes the species it was deployed for");
     it("rejects a zero admin");
     it("rejects an empty species name");
@@ -92,8 +92,35 @@ describe("LineageRegistry (core)", function () {
     it("rejects a female token named as sire");
     it("rejects a male token named as dam");
     it("rejects a parent that does not exist");
-    it("allows a single known parent, leaving the other slot at 0");
-    it("allows both slots unknown, for a founding animal");
+  });
+
+  describe("all-or-nothing parentage", function () {
+    it("registers a founder with both slots at 0");
+    it("rejects a sire with no dam");
+    it("rejects a dam with no sire");
+    it("never records a node whose sire is set and dam is not, or vice versa");
+  });
+
+  describe("birth dates and chronology", function () {
+    it("records the birth date in the node itself");
+    it("requires a birth date");
+    it("rejects a birth date in the future");
+    it("rejects a sire born after the offspring");
+    it("rejects a dam born after the offspring");
+    it("rejects a parent born in the same second as the offspring");
+    it("allows a parent that died before the offspring was born (posthumous breeding)");
+  });
+
+  describe("parent-side consent", function () {
+    it("rejects naming another owner's token as a parent without approval");
+    it("lets an owner name their own tokens without any grant");
+    it("accepts a per-token approval");
+    it("accepts a blanket approval covering tokens acquired after the grant");
+    it("stops honouring a blanket approval once the token changes hands");
+    it("revokes a per-token approval");
+    it("approves many parent tokens in one batch call");
+    it("reverts the whole batch if any token in it is not the caller's");
+    it("canUseAsParent reverts for a token that does not exist");
   });
 
   describe("acyclicity by construction", function () {
@@ -103,9 +130,10 @@ describe("LineageRegistry (core)", function () {
 
   describe("views", function () {
     it("getParents reverts for a token that does not exist");
-    it("getParentsBatch returns (0,0) for tokens that do not exist rather than reverting");
+    it("getNode returns sire, dam, birth date and sex in one call");
+    it("getNodesBatch zero-fills tokens that do not exist rather than reverting");
     it("isMale returns false for a token that does not exist, same as for a female");
-    it("walks a three-generation pedigree breadth-first with getParentsBatch");
+    it("walks a three-generation pedigree breadth-first with getNodesBatch");
   });
 
   describe("ERC-165", function () {
@@ -124,37 +152,14 @@ describe("module: Offspring", function () {
   it("reverts for a token that does not exist");
 });
 
-describe("module: LinkApproval", function () {
-  it("advertises its interface id");
-  it("rejects naming another owner's token as a parent without approval");
-  it("accepts a per-token approval");
-  it("accepts a blanket approval covering tokens acquired after the grant");
-  it("stops honouring a blanket approval once the token changes hands");
-  it("revokes a per-token approval");
-  it("approves many parent tokens in one batch call");
-  it("reverts the whole batch if any token in it is not the caller's");
-  it("also gates late attachment, not only registration");
-});
-
-describe("module: Dated", function () {
-  it("advertises its interface id");
-  it("records and returns a birth timestamp");
-  it("requires a birth timestamp");
-  it("rejects a birth timestamp in the future");
-  it("rejects a sire born after the offspring");
-  it("rejects a dam born after the offspring");
-  it("checks chronology on a parent attached late, against the child's recorded date");
-  it("allows a parent that died before the offspring was born (posthumous breeding)");
-});
-
 describe("module: LateParentage", function () {
   it("advertises its interface id");
-  it("fills an empty sire slot after registration");
-  it("fills the dam in a separate later call");
-  it("refuses to overwrite a parent that is already recorded");
-  it("rejects an attach with both slots zero");
+  it("promotes a founder to a parented node");
+  it("refuses to overwrite parentage that is already recorded");
+  it("rejects an attach with either slot at zero");
   it("rejects an attach from someone who is neither the child's owner nor an approved linker");
   it("accepts an attach from a child-side approved linker");
+  it("still enforces parent-side consent, sex and chronology through core");
   it("refuses to let a token be its own parent");
   it("refuses an attachment that would create a cycle");
   it("permits attaching a parent registered after the child, when no cycle results");
@@ -163,9 +168,11 @@ describe("module: LateParentage", function () {
 describe("module: Mergeable", function () {
   it("advertises its interface id");
   it("burns the duplicate and re-points its offspring at the survivor");
-  it("adopts the duplicate's parentage when the survivor has none");
+  it("adopts the duplicate's parentage when the survivor is a founder");
+  it("re-validates adopted parents against the survivor's own birth date");
   it("rejects a merge where both sides have different recorded parents");
   it("rejects a merge between tokens of different sexes");
+  it("rejects a merge whose survivor is recorded as born after the duplicate");
   it("rejects a merge that would make an ancestor its own descendant");
   it("records a mergedInto tombstone that outlives the burned token");
   it("returns 0 from mergedInto for a token that was never merged");
@@ -202,8 +209,14 @@ describe("PedigreeRegistry (domain)", function () {
   describe("breed policy", function () {
     it("rejects a cross-breed parent under a Purebred breed");
     it("accepts a cross-breed parent under an Open breed");
-    it("accepts an unknown parent under a Purebred breed");
+    it("accepts a founder under a Purebred breed");
     it("applies the breed rule to late attachment too");
+    it("lets core's error win when a parent does not exist, rather than reporting a breed mismatch");
+  });
+
+  describe("phantom placeholders", function () {
+    it("pairs a documented sire against a nameless founder dam");
+    it("keeps such a placeholder usable as a parent for later offspring");
   });
 
   describe("merge consent", function () {

@@ -16,21 +16,28 @@ import "../interfaces/ILineageRegistryOffspring.sol";
  *         registration and parentage attached later — without knowing that late attachment
  *         exists.
  *
- * @dev Cost: one array push per known parent, per registration. That is the single largest
- *      recurring storage cost in the standard, which is why this is a module and not core —
- *      the same information is reconstructible off-chain from {ParentageLinked} events.
+ * @dev **This is the most expensive thing in the standard.** Two array pushes per parented
+ *      registration — two cold `SSTORE`s — cost roughly 89,000 gas, comfortably more than
+ *      everything core does put together. It is a module for exactly that reason: the same
+ *      information is fully reconstructible off-chain from {ParentageLinked} events, so a
+ *      registry that does not need to answer "who are this stallion's foals?" *on-chain* should
+ *      not install it and should not pay for it.
+ *
+ *      {LineageRegistryMergeable} and {LineageRegistryBurnable} both require it, because neither
+ *      can find a node's children without the index.
  */
 abstract contract LineageRegistryOffspring is ILineageRegistryOffspring, LineageRegistry {
     /// @dev parentTokenId → offspring token IDs. Append-only in normal operation; entries are
     ///      removed only by the merge and burn modules, which detach a node from its parents.
     mapping(uint256 => uint256[]) internal _offspring;
 
-    /// @dev Records the reverse edge for whichever slots this call is setting.
+    /// @dev Records both reverse edges. Core guarantees parentage arrives as a complete pair, so
+    ///      there is no partial case to handle.
     function _writeParents(uint256 tokenId, uint256 sireId, uint256 damId) internal virtual override {
         super._writeParents(tokenId, sireId, damId);
 
-        if (sireId != 0) _offspring[sireId].push(tokenId);
-        if (damId != 0) _offspring[damId].push(tokenId);
+        _offspring[sireId].push(tokenId);
+        _offspring[damId].push(tokenId);
     }
 
     /// @dev Removes `childId` from `parentId`'s offspring list by swap-and-pop.

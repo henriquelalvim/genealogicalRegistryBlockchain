@@ -3,8 +3,6 @@ pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
 
-import "./modules/LineageRegistryLinkApproval.sol";
-import "./modules/LineageRegistryDated.sol";
 import "./modules/LineageRegistryLateParentage.sol";
 import "./modules/LineageRegistryMergeable.sol";
 import "./modules/LineageRegistryBurnable.sol";
@@ -13,18 +11,21 @@ import "./modules/LineageRegistryBurnable.sol";
  * @title PedigreeRegistry
  * @notice Reference composition of the lineage standard for pedigree animals.
  *
- *         This contract installs the full module set, which is what a studbook needs:
+ *         Core already carries everything a studbook cannot do without — sexed parentage, the
+ *         all-or-nothing pair rule, birth dates and chronology, and parent-side consent. This
+ *         contract installs the four optional modules on top:
  *
  *         | Module         | Why a studbook wants it                                   |
  *         | -------------- | --------------------------------------------------------- |
  *         | Offspring      | "how many foals has this stallion sired?" on-chain         |
- *         | LinkApproval   | you cannot claim someone else's champion as your sire      |
- *         | Dated          | rejects chronologically impossible pedigrees               |
  *         | LateParentage  | the sire is often identified after the foal is registered  |
  *         | Mergeable      | the same animal gets registered twice constantly           |
  *         | Burnable       | retire a mistaken leaf record                              |
  *
- *         A different domain would compose a different subset — that is the point of the split.
+ *         Offspring is reached through Mergeable and Burnable, which both require it. It is by
+ *         far the most expensive module — a registry that never asks "who are this animal's
+ *         children?" on-chain should compose without it and reconstruct the index from events.
+ *         A different domain composes a different subset; that is the point of the split.
  *         Consumers can tell which modules a deployment installed by probing `supportsInterface`.
  *
  *         On top of the modules this contract adds what is genuinely its own: **breeds** (the
@@ -44,18 +45,23 @@ import "./modules/LineageRegistryBurnable.sol";
  *
  * ## Who may do what
  *
- * Registration is **permissionless**. Anyone may register an animal of their own; naming
- * someone else's animal as a parent needs that owner's approval, which the LinkApproval module
- * enforces. There is no certification tier and no registrar role — a breed association that
- * wants to attest to pedigrees does so by participating, not by gatekeeping.
+ * Registration is **permissionless**. Anyone may register an animal of their own; naming someone
+ * else's animal as a parent needs that owner's approval, which core enforces. There is no
+ * certification tier and no registrar role — a breed association that wants to attest to
+ * pedigrees does so by participating, not by gatekeeping.
  *
  * The only privileged actions are creating breeds and opening or closing them
  * (`BREED_ADMIN_ROLE`), and setting the metadata base URI (`DEFAULT_ADMIN_ROLE`). Neither can
  * touch an existing animal's genealogy or ownership.
+ *
+ * ## Animals with one documented parent
+ *
+ * Core records parentage as a pair or not at all. When only the sire is known, register a
+ * **phantom placeholder** dam — a founder of the missing sex, under the same breed, with no
+ * name — and pair against it. The documented parent survives, the graph stays uniform, and the
+ * gap is visible as a nameless node instead of hiding inside a half-filled record.
  */
 contract PedigreeRegistry is
-    LineageRegistryLinkApproval,
-    LineageRegistryDated,
     LineageRegistryLateParentage,
     LineageRegistryMergeable,
     LineageRegistryBurnable,
@@ -70,9 +76,9 @@ contract PedigreeRegistry is
     // ──────────────────────────── Types ────────────────────────────
 
     /// @notice How strictly a breed constrains the ancestry of animals registered under it.
-    /// @dev    `Purebred` — every *known* parent must share the breed. Unknown parents (0) always
-    ///         pass, so an animal with undocumented ancestry stays registerable; the rule
-    ///         constrains what you assert, not what you omit.
+    /// @dev    `Purebred` — both parents must share the breed. Founders always pass, so an animal
+    ///         with undocumented ancestry stays registerable; the rule constrains what you
+    ///         assert, not what you omit.
     ///         `Open` — parents of any breed, which is how crossbreeds and breeds-in-formation
     ///         are represented.
     enum BreedPolicy {
@@ -187,11 +193,14 @@ contract PedigreeRegistry is
     // ──────────────────────────── Registration ────────────────────────────
 
     /// @notice Registers an animal. Permissionless — but naming someone else's animal as a
-    ///         parent still requires their approval, enforced by the LinkApproval module.
+    ///         parent still requires their approval, which core enforces.
     ///
-    /// @dev Genealogical rules come from the stack: sex typing and parent existence from core,
-    ///      consent from LinkApproval, chronology from Dated. This function adds exactly one
-    ///      rule of its own — breed compatibility — and then records the domain data.
+    ///         Pass `(0, 0)` for a founder, or two existing tokens. One of each is rejected; see
+    ///         the note on phantom placeholders in this contract's header.
+    ///
+    /// @dev Every genealogical rule comes from core: the pair rule, sex typing, parent existence,
+    ///      chronology and consent. This function adds exactly one rule of its own — breed
+    ///      compatibility — and then records the domain data.
     function register(
         address to,
         uint256 breedId,
@@ -206,7 +215,7 @@ contract PedigreeRegistry is
 
         _requireBreedCompatible(breedId, sireId, damId);
 
-        tokenId = _registerDatedNode(to, sireId, damId, isMale_, birthTimestamp);
+        tokenId = _registerNode(to, sireId, damId, isMale_, birthTimestamp);
 
         _animals[tokenId] =
             Animal({breedId: breedId, name: name_, externalRef: externalRef, deathTimestamp: 0});
@@ -214,9 +223,9 @@ contract PedigreeRegistry is
         emit AnimalRegistered(tokenId, breedId, to, sireId, damId, isMale_, birthTimestamp);
     }
 
-    /// @notice Fills in a parent that was unknown at registration.
-    /// @dev    Adds the breed rule on top of the LateParentage module's own checks (slot empty,
-    ///         caller authorized, no cycle) and Dated's chronology check.
+    /// @notice Records the parents of an animal registered as a founder.
+    /// @dev    Adds the breed rule on top of the LateParentage module's own checks (still a
+    ///         founder, caller authorized, no cycle) and core's.
     function attachParentage(uint256 tokenId, uint256 sireId, uint256 damId)
         public
         override
@@ -226,12 +235,24 @@ contract PedigreeRegistry is
         super.attachParentage(tokenId, sireId, damId);
     }
 
-    /// @dev Enforces the breed's ancestry rule. Unknown parents (0) always pass.
+    /// @dev Enforces the breed's ancestry rule, and only that.
+    ///
+    ///      It runs before core sees the pair, so it is careful to stay silent about anything
+    ///      core is going to reject anyway — a founder, a half-pair, or an ID that is not a live
+    ///      animal here. Otherwise a missing sire would surface as "different breed" instead of
+    ///      "does not exist", and the misleading message would be the only one the caller sees.
+    ///
+    ///      A registered animal always has a non-zero `breedId`, so zero means "not one of ours".
     function _requireBreedCompatible(uint256 breedId, uint256 sireId, uint256 damId) internal view {
+        if (sireId == 0 || damId == 0) return;
         if (_breeds[breedId].policy != BreedPolicy.Purebred) return;
 
-        if (sireId != 0) require(_animals[sireId].breedId == breedId, "Sire is of a different breed");
-        if (damId != 0) require(_animals[damId].breedId == breedId, "Dam is of a different breed");
+        uint256 sireBreed = _animals[sireId].breedId;
+        uint256 damBreed = _animals[damId].breedId;
+        if (sireBreed == 0 || damBreed == 0) return;
+
+        require(sireBreed == breedId, "Sire is of a different breed");
+        require(damBreed == breedId, "Dam is of a different breed");
     }
 
     // ──────────────────────────── Death ────────────────────────────
@@ -246,7 +267,7 @@ contract PedigreeRegistry is
         require(a.deathTimestamp == 0, "Death already recorded");
         require(deathTimestamp > 0, "Death timestamp required");
         require(deathTimestamp <= block.timestamp, "Death cannot be in the future");
-        require(deathTimestamp >= _birthTimestamp[tokenId], "Death precedes birth");
+        require(deathTimestamp >= _nodes[tokenId].birthTimestamp, "Death precedes birth");
 
         a.deathTimestamp = deathTimestamp;
         emit DeathRecorded(tokenId, deathTimestamp);
@@ -304,8 +325,8 @@ contract PedigreeRegistry is
         _executeMerge(survivorId, duplicateId);
     }
 
-    /// @dev The domain precondition. Sex equality, the cycle guard and the parentage-conflict
-    ///      rule all come from the Mergeable module.
+    /// @dev The domain precondition. Sex equality, the birth-order rule, the cycle guard and the
+    ///      parentage-conflict rule all come from the Mergeable module.
     function _requireMergeable(uint256 survivorId, uint256 duplicateId) internal view {
         require(
             _animals[survivorId].breedId == _animals[duplicateId].breedId,
@@ -390,13 +411,13 @@ contract PedigreeRegistry is
 
     // ──────────────────────────── Multi-base resolution ────────────────────────────
 
-    /// @dev Three modules extend the parentage write path — LinkApproval (consent), Dated
-    ///      (chronology) and Offspring (reverse index, reached through Mergeable/Burnable).
-    ///      Solidity requires the most-derived contract to name them all; `super` then runs the
-    ///      whole chain in linearized order.
+    /// @dev Only one module extends the parentage write path now — Offspring, reached through
+    ///      Mergeable and Burnable. LateParentage reaches core's version unextended, so Solidity
+    ///      sees two definitions and requires the most-derived contract to name both; `super`
+    ///      then runs the chain in linearized order.
     function _writeParents(uint256 tokenId, uint256 sireId, uint256 damId)
         internal
-        override(LineageRegistry, LineageRegistryOffspring, LineageRegistryLinkApproval, LineageRegistryDated)
+        override(LineageRegistry, LineageRegistryOffspring)
     {
         super._writeParents(tokenId, sireId, damId);
     }
@@ -407,8 +428,6 @@ contract PedigreeRegistry is
         public
         view
         override(
-            LineageRegistryLinkApproval,
-            LineageRegistryDated,
             LineageRegistryLateParentage,
             LineageRegistryMergeable,
             LineageRegistryBurnable,

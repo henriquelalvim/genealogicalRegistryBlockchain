@@ -26,9 +26,12 @@ abstract contract LineageRegistryBurnable is ILineageRegistryBurnable, LineageRe
         require(_isAuthorized(owner, msg.sender, tokenId), "Not authorized to burn");
         require(_offspring[tokenId].length == 0, "Token has offspring");
 
+        // Detach from both parents, or from neither: a founder has no reverse edges to remove.
         Node storage n = _nodes[tokenId];
-        if (n.sireId != 0) _removeOffspring(n.sireId, tokenId);
-        if (n.damId != 0) _removeOffspring(n.damId, tokenId);
+        if (n.sireId != 0) {
+            _removeOffspring(n.sireId, tokenId);
+            _removeOffspring(n.damId, tokenId);
+        }
 
         _burn(tokenId);
         delete _nodes[tokenId];

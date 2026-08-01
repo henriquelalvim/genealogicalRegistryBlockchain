@@ -36,10 +36,10 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
     /// @dev Destructively merges `duplicateId` into `survivorId`.
     ///
     ///      Writes parent pointers **directly** rather than through {_writeParents}. That is
-    ///      deliberate: routing the re-pointing through the ordinary path would consult
-    ///      {LineageRegistryLinkApproval} for edges that already exist and were already
-    ///      consented to, and would double-record them in the offspring index. Consent for the
-    ///      merge as a whole is the deriving contract's responsibility.
+    ///      deliberate: routing the re-pointing through the ordinary path would re-check core's
+    ///      consent rules for edges that already exist and were already agreed to, and would
+    ///      double-record them in the offspring index. Consent for the merge as a whole is the
+    ///      deriving contract's responsibility.
     function _mergeLineage(uint256 survivorId, uint256 duplicateId) internal virtual {
         require(survivorId != duplicateId, "Cannot merge a token with itself");
         require(_ownerOf(survivorId) != address(0), "Survivor does not exist");
@@ -54,17 +54,34 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
         Node storage s = _nodes[survivorId];
         Node storage d = _nodes[duplicateId];
 
-        // Parentage reconciliation. The survivor is authoritative: if it has no parents it adopts
-        // the duplicate's; if both sides have parents and they disagree, refuse rather than
-        // silently discard one account of the animal's ancestry.
-        if (s.sireId == 0 && s.damId == 0) {
-            if (d.sireId != 0 || d.damId != 0) {
+        // Two records of one animal often disagree on its birth date. Keeping the *earlier* one
+        // is the conservative choice, and it is also what makes the re-pointing below safe: every
+        // child of the duplicate was born after the duplicate, so if the survivor is no younger
+        // it was born before those children too, and no re-pointed edge can become a paradox.
+        // Checked once here instead of per child.
+        require(
+            s.birthTimestamp <= d.birthTimestamp,
+            "Survivor recorded as born after duplicate"
+        );
+
+        // Parentage reconciliation. The survivor is authoritative: if it is a founder it adopts
+        // the duplicate's parents; if both sides have parents and they disagree, refuse rather
+        // than silently discard one account of the animal's ancestry. The pair invariant means an
+        // empty sire slot implies an empty dam slot, so one test settles which case applies.
+        if (s.sireId == 0) {
+            if (d.sireId != 0) {
+                // Those parents were validated against the *duplicate's* birth date, which may
+                // differ from the survivor's. Re-check before adopting them, or the merge could
+                // manufacture a pedigree that registration would have rejected. Consent is
+                // deliberately not re-consulted; see the note above.
+                _requireValidParents(d.sireId, d.damId, s.birthTimestamp);
+
                 s.sireId = d.sireId;
                 s.damId = d.damId;
-                if (d.sireId != 0) _offspring[d.sireId].push(survivorId);
-                if (d.damId != 0) _offspring[d.damId].push(survivorId);
+                _offspring[d.sireId].push(survivorId);
+                _offspring[d.damId].push(survivorId);
             }
-        } else if (d.sireId != 0 || d.damId != 0) {
+        } else if (d.sireId != 0) {
             require(s.sireId == d.sireId && s.damId == d.damId, "Parentage conflict");
         }
 
@@ -92,8 +109,10 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
         delete _offspring[duplicateId];
 
         // Detach the duplicate from its own parents' offspring lists.
-        if (d.sireId != 0) _removeOffspring(d.sireId, duplicateId);
-        if (d.damId != 0) _removeOffspring(d.damId, duplicateId);
+        if (d.sireId != 0) {
+            _removeOffspring(d.sireId, duplicateId);
+            _removeOffspring(d.damId, duplicateId);
+        }
 
         _burn(duplicateId);
         delete _nodes[duplicateId];

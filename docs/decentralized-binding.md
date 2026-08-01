@@ -47,8 +47,42 @@ struct ParentRef {
 ```
 
 That is not a cosmetic change. `Node` roughly triples in size, `_offspring` stops being a
-`uint256[]`, and every read path in the standard — `getParents`, `getParentsBatch`,
-`getOffspring` — changes signature. It is a different ERC, not a compatible extension.
+`uint256[]`, and every read path in the standard — `getParents`, `getNodesBatch`, `getOffspring` —
+changes signature. It is a different ERC, not a compatible extension.
+
+### …or it does not, if foreign parents are mirrored
+
+There is a second option that this note originally missed, and it is materially cheaper.
+
+Instead of widening the parent reference, **import the foreign animal as an ordinary local
+token** flagged as a mirror, carrying an origin pointer `(registry, tokenId)` in module storage.
+Your foal's dam is then a perfectly normal local ID that happens to stand for something living
+elsewhere.
+
+This needs **no core changes at all**:
+
+- `_registerNode`, `_writeParents` and `_requireValidParents` are all `virtual`, and
+  `_mint(to, …)` takes an arbitrary address, so a module can mint mirrors on its own terms.
+- **Local acyclicity survives intact.** A mirror is an ordinary local token with its own
+  monotonically-assigned ID, so the parent-ID-is-lower property still holds. The pessimistic
+  conclusion further down this document — that acyclicity degrades to a social guarantee — applies
+  to the widened-reference design, not to this one.
+- **Consent already works across contracts.** `canUseAsParent(tokenId, caller)` takes the caller
+  as an argument rather than reading `msg.sender`, so registry B can ask registry A whether Alice
+  may use token 42, and act on a truthful answer.
+
+The costs are real but different in kind:
+
+- **`getOffspring` stops being a global answer.** It reports children hosted *here*, and a mirror
+  hosted in three registries has three partial child lists.
+- **Identity becomes the origin pointer**, not the token ID. The same animal exists as separate
+  mirrors in every registry that references it, and only the `(registry, tokenId)` pair ties them
+  together. Deduplication moves to whoever is reading.
+- **A mirror is a claim about someone else's data, frozen at import time.** If the origin registry
+  later corrects the animal's sex or birth date, the mirror does not learn about it.
+
+Which of the two designs is right depends on whether cross-registry pedigrees are the normal case
+or the exception. Mirrors are an extension; the widened reference is a new ERC.
 
 ### The acyclicity guarantee weakens
 
@@ -117,10 +151,19 @@ into indexers, where different implementations will disagree.
 The work done here makes the variant *reachable* rather than blocking it:
 
 - `ILineageRegistry` plus ERC-165 is exactly the discovery mechanism a binding handshake needs.
-- Keeping the domain (breeds, records, consent) in the child means a future federated child can
-  swap topology without touching genealogy logic.
+- `canUseAsParent(tokenId, caller)` is deliberately caller-parameterized rather than reading
+  `msg.sender`, which is what lets one registry answer another's consent question.
+- The parentage write path is a single `virtual` choke point, `_writeParents`, and parent
+  validation is a separate `virtual` function beside it. A mirror module hooks those two and
+  touches nothing else.
+- Keeping the domain (breeds, records) in the child means a future federated child can swap
+  topology without touching genealogy logic.
 
-The one thing to be careful about: **the standard currently assumes parent IDs are local.** If the
-federated design is likely to happen, that assumption should be called out explicitly in the ERC
-text — as a stated scope boundary, not an accident — so a future `ILineageRegistryFederated` is a
-clean sibling rather than a contradiction.
+The one thing to be careful about: **the standard currently assumes parent IDs are local.** That
+assumption should be called out explicitly in the ERC text — as a stated scope boundary, not an
+accident — so a future `ILineageRegistryFederated` is a clean sibling rather than a contradiction.
+
+Two rules added since this note was written also matter here. Parentage is now **all-or-nothing**,
+so importing one foreign parent means importing or placeholder-ing the other — a mirror can never
+be half a pair. And **chronology is core**, so a mirror must carry a birth date, which means
+trusting the origin registry's date or restating it locally.

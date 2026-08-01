@@ -15,10 +15,14 @@ pragma solidity ^0.8.28;
  * ## Rules enforced by the primitive
  *
  * - **Same sex.** Merging across sexes would corrupt the sire/dam typing of every child.
- * - **Survivor is authoritative on parentage.** If the survivor has no recorded parents it
- *   adopts the duplicate's. If both have parents and they *differ*, the merge reverts — a real
- *   contradiction about ancestry is a human problem, and silently picking a winner destroys
+ * - **Survivor is authoritative on parentage.** If the survivor is a founder it adopts the
+ *   duplicate's parents — re-validated against the survivor's own birth date, since the two
+ *   records may disagree about it. If both have parents and they *differ*, the merge reverts: a
+ *   real contradiction about ancestry is a human problem, and silently picking a winner destroys
  *   evidence.
+ * - **Survivor is no younger than the duplicate.** Two records of one animal routinely disagree
+ *   on its birth date; keeping the earlier is the conservative choice, and it is what guarantees
+ *   that no re-pointed child ends up older than its own parent.
  * - **No ancestor/descendant merges**, which would create a cycle.
  *
  * ## What this module does not decide
@@ -28,7 +32,7 @@ pragma solidity ^0.8.28;
  * agreeing, or a registrar acting under some external authority are all defensible.
  *
  * Note also that the merge writes parent pointers directly rather than through the ordinary
- * parentage path, so {ILineageRegistryLinkApproval} is **not** consulted for the re-pointing.
+ * parentage path, so core's parent-side consent is **not** re-consulted for the re-pointing.
  * Consent is expected to have been obtained once, for the merge as a whole, by the deriving
  * contract.
  *
