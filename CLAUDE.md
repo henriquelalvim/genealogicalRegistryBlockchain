@@ -134,9 +134,10 @@ it silently costs an `SSTORE` per registration.
   signature changes.
 - **ERC-165 IDs are computed from the interfaces and documented in `README.md`.** Any signature
   change moves them; recompute and update the table.
-- **Known and intentional:** contracts are headed `SPDX-License-Identifier: MIT` while the repo
-  ships Apache-2.0. Flagged in the README as a decision to make before publishing — don't
-  unilaterally "fix" it.
+- **Licensing is settled and split.** Code is MIT (repo `LICENSE` + every contract's SPDX header),
+  matching the convention for ERC reference implementations. The ERC document under `docs/` is
+  **CC0-1.0**, because EIP-1 requires it. Keep them distinct — a contributor "unifying" them
+  breaks the ERC submission.
 
 ## Branches
 

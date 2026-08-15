@@ -388,8 +388,6 @@ what remains. Note the bare `.to.be.reverted` matcher is deprecated in this tool
   in other ways.
 - **Revert strings, not custom errors.** Custom errors would shave real bytecode off every
   contract here. Kept as strings for legibility while the standard is still being drafted.
-- **License mismatch.** Contracts are headed `SPDX-License-Identifier: MIT`; the repository ships
-  Apache-2.0. Pick one before publishing.
 - **Sex is a single boolean.** Species with other reproductive models are out of scope by design —
   worth stating explicitly in the ERC rather than leaving implicit.
 - **No interface is frozen.** Every ID above moves if a signature changes.
@@ -412,4 +410,9 @@ what remains. Note the bare `.to.be.reverted` matcher is deprecated in this tool
 
 ## License
 
-Apache-2.0 (`LICENSE`) — but see the license mismatch noted above.
+MIT (`LICENSE`), matching the `SPDX-License-Identifier` header on every contract and the
+convention for ERC reference implementations.
+
+The ERC document itself is a separate matter: EIP-1 requires every EIP and ERC to be published
+under **CC0-1.0**, so [`docs/erc-lineage-registry.md`](docs/erc-lineage-registry.md) carries that
+instead.

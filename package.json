@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "A proposed ERC standard for on-chain lineage registries: ERC-721 tokens forming a sexed genealogical DAG, with pedigree animals as the driving use case.",
-  "license": "Apache-2.0",
+  "license": "MIT",
   "engines": {
     "node": ">=22"
   },
