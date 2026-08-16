@@ -1,0 +1,18 @@
+{
+  "network": "baseSepolia",
+  "chainId": 84532,
+  "contract": "PedigreeRegistry",
+  "address": "0xcd64676020A0bbfaA35252E9A25eF7662463EdEC",
+  "constructorArgs": [
+    "TestName",
+    "TestSymbol",
+    "TestSpecies",
+    "0xcB9140283E53A06a82EA6fD9995063016183bEAF"
+  ],
+  "deployer": "0xcB9140283E53A06a82EA6fD9995063016183bEAF",
+  "admin": "0xcB9140283E53A06a82EA6fD9995063016183bEAF",
+  "transactionHash": "0xffc2453745d6ea77ca324d7caa3b0a2ea3492d38fc66ee9dcbb91873755a9e22",
+  "blockNumber": 45557944,
+  "gasUsed": "4760299",
+  "deployedAt": "2026-08-16T12:43:04.416Z"
+}

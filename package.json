@@ -14,7 +14,8 @@
     "typecheck": "hardhat compile && tsc --noEmit -p tsconfig.json",
     "clean": "hardhat clean",
     "node": "hardhat node",
-    "deploy:local": "hardhat ignition deploy ignition/modules/PedigreeRegistry.ts --network localhost"
+    "deploy:local": "hardhat ignition deploy ignition/modules/PedigreeRegistry.ts --network localhost",
+    "deploy:base-sepolia": "hardhat --build-profile production run scripts/deploy-base-sepolia.ts"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-toolbox-mocha-ethers": "^3.0.7",

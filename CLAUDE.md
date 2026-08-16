@@ -30,6 +30,12 @@ npx hardhat clean
 
 Local deploy: `npx hardhat node` in one terminal, `npm run deploy:local` in another.
 
+Public deploy: `npm run deploy:base-sepolia` (chain 84532). `hardhat.config.ts` calls
+`process.loadEnvFile()` — Hardhat 3 ships no dotenv — and then deletes every empty-string env var,
+so a key left blank in `.env` reads as unset rather than as `""`. Hardhat 3.11 already knows chain
+84532, so `hardhat verify` needs no explorer config. Deploy and verify must use the **same build
+profile** (`--build-profile production`, which the npm script sets) or the bytecode will not match.
+
 `tsc` depends on `types/` (typechain output), so **compile before typechecking** — that is what
 `npm run typecheck` does and why the order matters.
 

@@ -318,6 +318,18 @@ npx hardhat node          # terminal 1
 npm run deploy:local      # terminal 2
 ```
 
+Deploy to **Base Sepolia** (chain 84532):
+
+```bash
+cp .env.example .env      # then fill in BASE_SEPOLIA_PRIVATE_KEY
+npm run deploy:base-sepolia
+```
+
+The script refuses to broadcast to the wrong chain or from an unfunded account, waits for the
+confirmations Basescan needs before it will index the address, writes the result to
+`deployments/base-sepolia.json`, and prints the `hardhat verify` command with the constructor
+arguments already quoted. Verification falls back to Blockscout, which needs no API key.
+
 ### Composing your own registry
 
 Install only what you need:
