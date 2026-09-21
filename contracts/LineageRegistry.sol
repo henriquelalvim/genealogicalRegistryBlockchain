@@ -7,75 +7,37 @@ import "./interfaces/ILineageRegistry.sol";
 
 /**
  * @title LineageRegistry
- * @notice Use-case-agnostic base for an ERC-721 registry whose tokens form a sexed genealogical
- *         DAG. This is the **core**: the set of rules that, if any one of them were optional,
- *         would leave you unable to trust the graph at all.
+ * @notice ERC-721 records of authorized parentage assertions. The contract enforces structural
+ *         consistency, not biological truth. Each sire/dam slot is independently optional and
+ *         write-once; zero means no parent has been recorded in that slot.
  *
- *         Core owns five things:
- *           - the node — sex, birth date, and a sire/dam pair;
- *           - the rule that a sire is male and a dam is female;
- *           - the rule that parentage is all-or-nothing and written once;
- *           - the rule that both parents were born before the offspring;
- *           - consent: naming someone else's token as a parent needs their permission.
+ * Every recorded parent must exist locally, have the appropriate sex, and have an immutable
+ * birth timestamp strictly earlier than its child's. Strictly decreasing timestamps along
+ * ancestry prove acyclicity, including late attachment, without depending on token ID order.
+ * Dates and sex cannot be edited. Mergeable defines the sole parent-pointer rewrite exception.
  *
- *         It does **not** own: the offspring reverse index, late parentage, merging, burning, or
- *         access control. Each is an optional module under `contracts/modules/`, discoverable at
- *         runtime through its own ERC-165 ID.
+ * This reference implementation allocates sequential, nonzero IDs and never reuses them.
+ * Allocation order is not a standard invariant. Node still occupies three storage slots.
  *
- * ## Why these five and not others
- *
- * A registry that drops any of them stops being a *record* and becomes a pile of assertions.
- * Without sex typing the pedigree is not a pedigree. Without the pair rule "no parents" and "one
- * parent" become indistinguishable in practice. Without write-once, history is editable. Without
- * chronology a foal can precede its own sire. Without consent anyone can hang their animal off
- * your champion. The modules, by contrast, each answer a question some registries never ask.
- *
- * ## Acyclicity is free
- *
- * {_registerNode} requires both parents to already exist, and token IDs increase monotonically.
- * A parent's ID is therefore always lower than its offspring's, so following parent edges
- * strictly decreases the ID and no cycle can exist. The chronology rule is *not* what buys this;
- * it buys the stronger, semantic guarantee that the pedigree could have happened in the physical
- * world.
- *
- * The one operation that can break ID monotonicity is attaching parentage *after* registration,
- * since the attached parent may hold a higher ID. That lives in `LineageRegistryLateParentage`
- * and carries its own cycle guard.
- *
- * ## Storage
- *
- * `Node` occupies three slots — `sireId`, `damId`, and `birthTimestamp` + `isMale` packed
- * together. Folding the birth date into the node rather than keeping it in a side mapping is
- * what makes it nearly free: the slot holding `isMale` is written at registration anyway, and a
- * parent's date is read from a slot the sex check has already warmed.
- *
- * A **founder** — a token with no recorded parentage — writes exactly one slot.
- *
- * ## Extending core
- *
- * Modules compose by overriding real internal functions and chaining through `super`, the
- * pattern OpenZeppelin v5 uses for `ERC721._update`. There are no empty hook functions: an
- * unused hook still costs a jump, whereas a `virtual` function that does actual work costs
- * nothing extra, and `super` resolves statically at compile time — no dynamic dispatch.
- *
- * {_writeParents} is the single choke point every parentage edge passes through, whether written
- * at registration or attached later. A module that must observe or veto parentage overrides that
- * one function and is then correct for both paths automatically.
- *
- * The contract is `abstract`: a concrete child must initialize ERC721 in its constructor.
+ * Modules extend real virtual operations through super. _writeParents handles registration and
+ * late attachment; merge performs its explicitly specified reconciliation separately. Concrete
+ * compositions initialize ERC721 and choose their own registration and merge access policies.
  */
 abstract contract LineageRegistry is ILineageRegistry, ERC721 {
     // ──────────────────────────── Storage ────────────────────────────
 
-    /// @dev Auto-incrementing token counter. Starts at 1 so tokenId 0 stays the "no recorded
-    ///      parent" sentinel — and so the parent-ID-is-lower property holds from the first mint.
+    /// @dev Reference allocation policy only. Zero is reserved and IDs are never reused.
     uint256 private _nextTokenId = 1;
 
     /// @dev tokenId → genealogical node.
     mapping(uint256 => Node) internal _nodes;
 
-    /// @dev parentTokenId → linker → approved.
-    mapping(uint256 => mapping(address => bool)) private _parentageLinkageApproval;
+    /// @dev Ownership generation shared by parent grants, child grants and merge proposals.
+    ///      Incrementing on transfer/burn invalidates all grants without enumerating linkers.
+    mapping(uint256 => uint256) internal _ownershipEpoch;
+
+    /// @dev parentTokenId → linker → epoch + 1; zero denotes no grant.
+    mapping(uint256 => mapping(address => uint256)) private _parentageLinkageApproval;
 
     /// @dev owner → linker → approved. Follows the owner, not the token.
     mapping(address => mapping(address => bool)) private _generalParentageLinkageApproval;
@@ -94,15 +56,14 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
 
     // ──────────────────────────── Core write path ────────────────────────────
 
-    /// @dev Mints a node. Pass `(0, 0)` for a founder, or two existing tokens for a full pedigree
-    ///      entry — never one of each; see {_writeParents}.
+    /// @dev Mints a node. Either parent slot may be zero; (0, 0) denotes a founder.
     ///
     ///      Emits {NodeRegistered}, and {ParentageLinked} through {_writeParents} when parents
     ///      are given. The deriving contract is expected to emit its own richer event alongside.
     ///
     /// @param to             Owner of the new token.
-    /// @param sireId         Father's token ID, or 0 for a founder.
-    /// @param damId          Mother's token ID, or 0 for a founder.
+    /// @param sireId         Father's local token ID, or 0 if unrecorded.
+    /// @param damId          Mother's local token ID, or 0 if unrecorded.
     /// @param isMale_        This token's sex.
     /// @param birthTimestamp Birth in Unix seconds. Required, and may not be in the future.
     /// @return tokenId       The newly minted token.
@@ -129,62 +90,52 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
         _mint(to, tokenId);
         emit NodeRegistered(tokenId, to, isMale_, birthTimestamp);
 
-        // A founder has no parentage to write. Skipping keeps the cheapest case cheap, and is
-        // what makes `(0, 0)` mean "founder" rather than "pair of unknowns".
+        // Founders need no edge writes or parentage event.
         if (sireId != 0 || damId != 0) _writeParents(tokenId, sireId, damId);
     }
 
-    /// @dev **The single choke point for every parentage edge in the system.** Both registration
-    ///      and late attachment funnel through here, so a module overriding this one function
-    ///      covers both paths.
-    ///
-    ///      Writes a complete pair. There is no partial write and no "leave the other slot as it
-    ///      was": a token either has both parents or neither.
-    ///
-    ///      Callers are responsible for refusing to overwrite parentage that is already
-    ///      recorded — {_registerNode} gets that for free on a fresh token, and
-    ///      `LineageRegistryLateParentage` checks it explicitly.
+    /// @dev Adds at least one recorded parent. Zero means leave that slot untouched. A nonzero
+    ///      argument MUST target an empty slot, even when it repeats an already-recorded ID.
+    ///      Both slots validate atomically; ParentageLinked reports the complete resulting pair.
     function _writeParents(uint256 tokenId, uint256 sireId, uint256 damId) internal virtual {
-        require(sireId != 0 && damId != 0, "Parentage must be a sire and a dam");
-
+        require(sireId != 0 || damId != 0, "No parents supplied");
         Node storage n = _nodes[tokenId];
+        require(sireId == 0 || n.sireId == 0, "Sire already recorded");
+        require(damId == 0 || n.damId == 0, "Dam already recorded");
 
         _requireValidParents(sireId, damId, n.birthTimestamp);
         _requireLinkConsent(sireId, damId);
 
-        n.sireId = sireId;
-        n.damId = damId;
-
-        emit ParentageLinked(tokenId, sireId, damId);
+        if (sireId != 0) n.sireId = sireId;
+        if (damId != 0) n.damId = damId;
+        emit ParentageLinked(tokenId, n.sireId, n.damId);
     }
 
-    /// @dev Existence, sex and chronology for a parent pair. Both IDs are non-zero by the time
-    ///      this runs.
-    ///
-    ///      Each parent costs two cold reads and no more: `_ownerOf` for existence, and the one
-    ///      packed slot that carries both `isMale` and `birthTimestamp`.
+    /// @dev Checks only supplied parents. Chronology also rejects self-parenting and any cycle;
+    ///      all extensions must preserve it for every edge they add or rewrite.
     function _requireValidParents(uint256 sireId, uint256 damId, uint64 offspringBirth)
         internal
         view
         virtual
     {
-        Node storage s = _nodes[sireId];
-        require(_ownerOf(sireId) != address(0), "Sire does not exist in registry");
-        require(s.isMale, "Designated sire is not male");
-        require(s.birthTimestamp < offspringBirth, "Time paradox: sire not born before offspring");
-
-        Node storage d = _nodes[damId];
-        require(_ownerOf(damId) != address(0), "Dam does not exist in registry");
-        require(!d.isMale, "Designated dam is not female");
-        require(d.birthTimestamp < offspringBirth, "Time paradox: dam not born before offspring");
+        if (sireId != 0) {
+            Node storage s = _nodes[sireId];
+            require(_ownerOf(sireId) != address(0), "Sire does not exist in registry");
+            require(s.isMale, "Designated sire is not male");
+            require(s.birthTimestamp < offspringBirth, "Time paradox: sire not born before offspring");
+        }
+        if (damId != 0) {
+            Node storage d = _nodes[damId];
+            require(_ownerOf(damId) != address(0), "Dam does not exist in registry");
+            require(!d.isMale, "Designated dam is not female");
+            require(d.birthTimestamp < offspringBirth, "Time paradox: dam not born before offspring");
+        }
     }
 
-    /// @dev Parent-side consent for both slots. Split from {_requireValidParents} so a deriving
-    ///      contract can relax or replace one without touching the other; the owner lookups it
-    ///      repeats are already warm, so the separation costs a couple of hundred gas.
+    /// @dev Existing edges need no renewed permission when the other slot is filled later.
     function _requireLinkConsent(uint256 sireId, uint256 damId) internal view virtual {
-        require(_canUseAsParent(sireId, msg.sender), "Not authorized to use sire");
-        require(_canUseAsParent(damId, msg.sender), "Not authorized to use dam");
+        if (sireId != 0) require(_canUseAsParent(sireId, msg.sender), "Not authorized to use sire");
+        if (damId != 0) require(_canUseAsParent(damId, msg.sender), "Not authorized to use dam");
     }
 
     /// @dev True if `caller` may use `parentTokenId` as a parent: its owner, a per-token grantee,
@@ -196,40 +147,37 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
     function _canUseAsParent(uint256 parentTokenId, address caller) internal view returns (bool) {
         address parentOwner = _ownerOf(parentTokenId);
 
-        return caller == parentOwner
-            || _parentageLinkageApproval[parentTokenId][caller]
-            || _generalParentageLinkageApproval[parentOwner][caller];
+        return parentOwner != address(0) && (caller == parentOwner
+            || parentageLinkageApproval(parentTokenId, caller)
+            || _generalParentageLinkageApproval[parentOwner][caller]);
     }
 
     /// @dev Sets a per-token grant and emits. Callers gate ownership.
     function _setParentageLinkageApproval(uint256 parentTokenId, address linker, bool approved) internal {
-        _parentageLinkageApproval[parentTokenId][linker] = approved;
+        _parentageLinkageApproval[parentTokenId][linker] = approved ? _ownershipEpoch[parentTokenId] + 1 : 0;
         emit ParentageLinkageApproved(parentTokenId, linker, approved);
     }
 
     // ──────────────────────────── Shared graph helper ────────────────────────────
 
-    /// @dev True if `ancestor` appears while walking up `ofToken`'s parent lines.
-    ///
-    ///      Core itself never calls this — registration cannot create a cycle, so nothing here
-    ///      needs it. It lives in core because it is a pure function of core state (`_nodes`),
-    ///      and both the late-parentage and merge modules need it; putting it here keeps those
-    ///      two modules independent of each other. Solidity emits no bytecode for it when no
-    ///      installed module references it, so an unused core deployment pays nothing.
-    ///
-    ///      Terminates because the graph is acyclic: parent IDs are always lower than child IDs,
-    ///      so the walk strictly descends. **Unbounded** — cost grows with the size of the
-    ///      ancestor set, which on a deep pedigree can exceed the block gas limit.
+    /// @dev Merge policy, not a cycle proof: rejects identifying an ancestor with a descendant.
+    ///      Still unbounded; shared ancestors may be visited repeatedly. Chronology guarantees
+    ///      termination and allows branches no older than the sought ancestor to be pruned.
     function _isAncestor(uint256 ancestor, uint256 ofToken) internal view returns (bool) {
+        if (ofToken == 0) return false;
         Node storage n = _nodes[ofToken];
-
-        // Founders, and tokens that do not exist, terminate the walk. The pair invariant means
-        // testing the sire alone is enough.
-        if (n.sireId == 0) return false;
-
+        if (_nodes[ancestor].birthTimestamp >= n.birthTimestamp) return false;
         if (n.sireId == ancestor || n.damId == ancestor) return true;
-
         return _isAncestor(ancestor, n.sireId) || _isAncestor(ancestor, n.damId);
+    }
+
+    /// @dev Ownership changes invalidate token-specific consent, including a transfer away and
+    ///      back to the same owner. Self-transfers preserve it because ownership did not change.
+    ///      ERC-721 Transfer is the observable invalidation event; no linker enumeration occurs.
+    function _update(address to, uint256 tokenId, address auth) internal virtual override returns (address) {
+        address from = super._update(to, tokenId, auth);
+        if (from != address(0) && from != to) _ownershipEpoch[tokenId]++;
+        return from;
     }
 
     // ──────────────────────────── Consent ────────────────────────────
@@ -269,8 +217,9 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
     }
 
     /// @inheritdoc ILineageRegistry
-    function parentageLinkageApproval(uint256 parentTokenId, address linker) external view returns (bool) {
-        return _parentageLinkageApproval[parentTokenId][linker];
+    function parentageLinkageApproval(uint256 parentTokenId, address linker) public view returns (bool) {
+        return _ownerOf(parentTokenId) != address(0)
+            && _parentageLinkageApproval[parentTokenId][linker] == _ownershipEpoch[parentTokenId] + 1;
     }
 
     /// @inheritdoc ILineageRegistry
@@ -280,13 +229,13 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
 
     // ──────────────────────────── Views ────────────────────────────
 
-    /// @inheritdoc ILineageRegistry
+    /// @notice Next sequential ID in this implementation; not part of ILineageRegistry.
     function nextTokenId() external view returns (uint256) {
         return _nextTokenId;
     }
 
     /// @inheritdoc ILineageRegistry
-    function isMale(uint256 tokenId) public view returns (bool) {
+    function isMale(uint256 tokenId) public view exists(tokenId) returns (bool) {
         return _nodes[tokenId].isMale;
     }
 

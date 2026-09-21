@@ -11,8 +11,8 @@ import "./modules/LineageRegistryBurnable.sol";
  * @title PedigreeRegistry
  * @notice Reference composition of the lineage standard for pedigree animals.
  *
- *         Core already carries everything a studbook cannot do without — sexed parentage, the
- *         all-or-nothing pair rule, birth dates and chronology, and parent-side consent. This
+ *         Core already carries everything a studbook cannot do without — sexed parentage, independently
+ *         optional write-once parents, birth dates and chronology, and parent-side consent. This
  *         contract installs the four optional modules on top:
  *
  *         | Module         | Why a studbook wants it                                   |
@@ -56,10 +56,8 @@ import "./modules/LineageRegistryBurnable.sol";
  *
  * ## Animals with one documented parent
  *
- * Core records parentage as a pair or not at all. When only the sire is known, register a
- * **phantom placeholder** dam — a founder of the missing sex, under the same breed, with no
- * name — and pair against it. The documented parent survives, the graph stays uniform, and the
- * gap is visible as a nameless node instead of hiding inside a half-filled record.
+ * Record the documented parent and leave the other slot zero. LateParentage can fill the gap
+ * later without inventing an identity or birth date for an unknown parent.
  */
 contract PedigreeRegistry is
     LineageRegistryLateParentage,
@@ -76,7 +74,7 @@ contract PedigreeRegistry is
     // ──────────────────────────── Types ────────────────────────────
 
     /// @notice How strictly a breed constrains the ancestry of animals registered under it.
-    /// @dev    `Purebred` — both parents must share the breed. Founders always pass, so an animal
+    /// @dev    `Purebred` — every recorded parent must share the breed. Founders always pass, so an animal
     ///         with undocumented ancestry stays registerable; the rule constrains what you
     ///         assert, not what you omit.
     ///         `Open` — parents of any breed, which is how crossbreeds and breeds-in-formation
@@ -113,8 +111,14 @@ contract PedigreeRegistry is
 
     mapping(uint256 => Animal) private _animals;
 
-    /// @dev duplicateId → proposed survivorId. A merge needs both owners to agree.
-    mapping(uint256 => uint256) private _mergeProposal;
+    struct MergeProposal {
+        uint256 survivorId;
+        uint256 survivorEpoch;
+        uint256 duplicateEpoch;
+    }
+
+    /// @dev Both ownership epochs bind the offer to the current owners, including round trips.
+    mapping(uint256 => MergeProposal) private _mergeProposal;
 
     string private _baseTokenURI;
 
@@ -195,10 +199,9 @@ contract PedigreeRegistry is
     /// @notice Registers an animal. Permissionless — but naming someone else's animal as a
     ///         parent still requires their approval, which core enforces.
     ///
-    ///         Pass `(0, 0)` for a founder, or two existing tokens. One of each is rejected; see
-    ///         the note on phantom placeholders in this contract's header.
+    ///         Either parent may be zero when unrecorded. Pass (0, 0) for a founder.
     ///
-    /// @dev Every genealogical rule comes from core: the pair rule, sex typing, parent existence,
+    /// @dev Every genealogical rule comes from core: write-once slots, sex typing, parent existence,
     ///      chronology and consent. This function adds exactly one rule of its own — breed
     ///      compatibility — and then records the domain data.
     function register(
@@ -223,9 +226,8 @@ contract PedigreeRegistry is
         emit AnimalRegistered(tokenId, breedId, to, sireId, damId, isMale_, birthTimestamp);
     }
 
-    /// @notice Records the parents of an animal registered as a founder.
-    /// @dev    Adds the breed rule on top of the LateParentage module's own checks (still a
-    ///         founder, caller authorized, no cycle) and core's.
+    /// @notice Fills one or both empty parent slots. Zero leaves a slot unchanged.
+    /// @dev Adds breed compatibility to child consent and core's write-once/chronology checks.
     function attachParentage(uint256 tokenId, uint256 sireId, uint256 damId)
         public
         override
@@ -235,24 +237,14 @@ contract PedigreeRegistry is
         super.attachParentage(tokenId, sireId, damId);
     }
 
-    /// @dev Enforces the breed's ancestry rule, and only that.
-    ///
-    ///      It runs before core sees the pair, so it is careful to stay silent about anything
-    ///      core is going to reject anyway — a founder, a half-pair, or an ID that is not a live
-    ///      animal here. Otherwise a missing sire would surface as "different breed" instead of
-    ///      "does not exist", and the misleading message would be the only one the caller sees.
-    ///
-    ///      A registered animal always has a non-zero `breedId`, so zero means "not one of ours".
+    /// @dev Every supplied parent of a Purebred animal must share its breed. Missing IDs are
+    ///      left to core's clearer existence errors; a zero slot carries no breed assertion.
     function _requireBreedCompatible(uint256 breedId, uint256 sireId, uint256 damId) internal view {
-        if (sireId == 0 || damId == 0) return;
         if (_breeds[breedId].policy != BreedPolicy.Purebred) return;
-
-        uint256 sireBreed = _animals[sireId].breedId;
-        uint256 damBreed = _animals[damId].breedId;
-        if (sireBreed == 0 || damBreed == 0) return;
-
-        require(sireBreed == breedId, "Sire is of a different breed");
-        require(damBreed == breedId, "Dam is of a different breed");
+        if ((sireId != 0 && _ownerOf(sireId) == address(0))
+            || (damId != 0 && _ownerOf(damId) == address(0))) return;
+        if (sireId != 0) require(_animals[sireId].breedId == breedId, "Sire is of a different breed");
+        if (damId != 0) require(_animals[damId].breedId == breedId, "Dam is of a different breed");
     }
 
     // ──────────────────────────── Death ────────────────────────────
@@ -284,7 +276,11 @@ contract PedigreeRegistry is
     {
         _requireMergeable(survivorId, duplicateId);
 
-        _mergeProposal[duplicateId] = survivorId;
+        _mergeProposal[duplicateId] = MergeProposal({
+            survivorId: survivorId,
+            survivorEpoch: _ownershipEpoch[survivorId],
+            duplicateEpoch: _ownershipEpoch[duplicateId]
+        });
         emit MergeProposed(survivorId, duplicateId, msg.sender);
     }
 
@@ -295,7 +291,7 @@ contract PedigreeRegistry is
         isTokenOwner(duplicateId)
         exists(survivorId)
     {
-        require(survivorId != 0 && _mergeProposal[duplicateId] == survivorId, "No matching merge proposal");
+        require(survivorId != 0 && pendingMerge(duplicateId) == survivorId, "No matching merge proposal");
 
         _requireMergeable(survivorId, duplicateId);
         _executeMerge(survivorId, duplicateId);
@@ -303,7 +299,7 @@ contract PedigreeRegistry is
 
     /// @notice Withdraws a standing offer. Either party may call it.
     function cancelMerge(uint256 duplicateId) external {
-        uint256 survivorId = _mergeProposal[duplicateId];
+        uint256 survivorId = _mergeProposal[duplicateId].survivorId;
         require(survivorId != 0, "No merge proposal");
         require(
             _ownerOf(duplicateId) == msg.sender || _ownerOf(survivorId) == msg.sender,
@@ -325,7 +321,7 @@ contract PedigreeRegistry is
         _executeMerge(survivorId, duplicateId);
     }
 
-    /// @dev The domain precondition. Sex equality, the birth-order rule, the cycle guard and the
+    /// @dev The domain precondition. Sex equality, the birth-order rule, the ancestor/descendant policy and the
     ///      parentage-conflict rule all come from the Mergeable module.
     function _requireMergeable(uint256 survivorId, uint256 duplicateId) internal view {
         require(
@@ -404,9 +400,14 @@ contract PedigreeRegistry is
         return _animals[tokenId].deathTimestamp != 0;
     }
 
-    /// @notice The survivor currently proposed for `duplicateId`, or 0 if there is no offer.
-    function pendingMerge(uint256 duplicateId) external view returns (uint256 survivorId) {
-        return _mergeProposal[duplicateId];
+    /// @notice Live proposed survivor, or zero for absent, burned or ownership-invalidated offers.
+    ///         Either candidate changing owner invalidates consent, even if later transferred back.
+    function pendingMerge(uint256 duplicateId) public view returns (uint256 survivorId) {
+        MergeProposal storage proposal = _mergeProposal[duplicateId];
+        survivorId = proposal.survivorId;
+        if (survivorId == 0 || _ownerOf(survivorId) == address(0) || _ownerOf(duplicateId) == address(0)
+            || proposal.survivorEpoch != _ownershipEpoch[survivorId]
+            || proposal.duplicateEpoch != _ownershipEpoch[duplicateId]) return 0;
     }
 
     // ──────────────────────────── Multi-base resolution ────────────────────────────

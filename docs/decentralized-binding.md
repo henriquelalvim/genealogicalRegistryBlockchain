@@ -63,10 +63,10 @@ This needs **no core changes at all**:
 
 - `_registerNode`, `_writeParents` and `_requireValidParents` are all `virtual`, and
   `_mint(to, …)` takes an arbitrary address, so a module can mint mirrors on its own terms.
-- **Local acyclicity survives intact.** A mirror is an ordinary local token with its own
-  monotonically-assigned ID, so the parent-ID-is-lower property still holds. The pessimistic
-  conclusion further down this document — that acyclicity degrades to a social guarantee — applies
-  to the widened-reference design, not to this one.
+- **Local acyclicity survives intact** if mirror edges obey immutable, strictly ordered birth
+  timestamps. IDs and registration order are irrelevant to that proof. Identifying equivalent
+  records across registries can still introduce cycles in a combined graph; the local guarantee
+  alone does not prove the safety of that reconciliation.
 - **Consent already works across contracts.** `canUseAsParent(tokenId, caller)` takes the caller
   as an argument rather than reading `msg.sender`, so registry B can ask registry A whether Alice
   may use token 42, and act on a truthful answer.
@@ -78,8 +78,9 @@ The costs are real but different in kind:
 - **Identity becomes the origin pointer**, not the token ID. The same animal exists as separate
   mirrors in every registry that references it, and only the `(registry, tokenId)` pair ties them
   together. Deduplication moves to whoever is reading.
-- **A mirror is a claim about someone else's data, frozen at import time.** If the origin registry
-  later corrects the animal's sex or birth date, the mirror does not learn about it.
+- **A mirror is a claim about someone else's data, frozen at import time.** Core currently makes
+  sex and dates immutable. A future correction or identity-supersession mechanism at the origin
+  would still need an explicit synchronization policy for mirrors.
 
 Which of the two designs is right depends on whether cross-registry pedigrees are the normal case
 or the exception. Mirrors are an extension; the widened reference is a new ERC.
@@ -163,7 +164,8 @@ The one thing to be careful about: **the standard currently assumes parent IDs a
 assumption should be called out explicitly in the ERC text — as a stated scope boundary, not an
 accident — so a future `ILineageRegistryFederated` is a clean sibling rather than a contradiction.
 
-Two rules added since this note was written also matter here. Parentage is now **all-or-nothing**,
-so importing one foreign parent means importing or placeholder-ing the other — a mirror can never
-be half a pair. And **chronology is core**, so a mirror must carry a birth date, which means
-trusting the origin registry's date or restating it locally.
+Since the September 2026 review, each parent slot is independently optional: importing one
+foreign parent does not require a placeholder for the other. Chronology remains core, so a mirror
+must carry a birth timestamp. The current direction is to leave core references local and explore
+separate attestations/indexers first. These are future designs, not implemented guarantees; see
+[decision review](decision-review.md) for the implemented boundary.

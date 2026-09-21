@@ -1,23 +1,20 @@
 # Genealogical Registry — an ERC standard for on-chain lineage
 
-A proposed ERC for recording **genealogies on-chain**: an ERC-721 registry whose tokens form a
-*sexed directed acyclic graph*. Every token carries its own sex and a birth date, and is either a
-**founder** or descends from one **sire** (male parent) and one **dam** (female parent).
+A proposed ERC for recording **authorized pedigree assertions on-chain** using ERC-721 tokens.
+Every record carries immutable sex and a reported birth timestamp, with independently optional
+**sire** (male parent) and **dam** (female parent) references. The contract enforces chronology,
+consent and a directed acyclic graph; it does not independently verify biological descent.
 
-Core is the set of rules that, if any one of them were optional, would leave you unable to trust
-the graph at all. Four things sit outside it — the offspring reverse index, late parentage,
-merging and burning — as optional modules with their own ERC-165 IDs, the way `ERC1155` relates
-to `ERC1155Supply` and `ERC1155Burnable`. A deployment composes exactly the registry it needs and
-consumers discover at runtime what they got.
+Core specifies observable behavior and invariants. Four optional interfaces add the offspring
+reverse index, late parentage, merging and burning. Consumers discover each through ERC-165.
+The reference composition is intended for pedigree animals with this reproduction model.
 
-The driving use case is **pedigree animals**, where the pedigree *is* the asset and today lives in
-a private studbook database nobody outside the association can verify. Nothing in core is
-species-specific, or even animal-specific.
-
-> **Status: early.** Core and all four modules are implemented and compile; the reference
-> composition is deployable and behaviourally verified (42 assertions). The test suite is a
-> structured skeleton — see [Testing](#testing). Read
-> [Known limitations](#known-limitations-and-open-questions) before using any of this for real.
+> **Review revision, 2026-09-21.** Partial parentage and transfer-scoped consent are implemented;
+> late attachment now relies on strict chronology without walking ancestors. Core interface ID
+> changed to `0x8911a112`. Existing deployments retain their old behavior. See the
+> [decision review](docs/decision-review.md) and [forum update draft](docs/forum-update.md).
+> Validation: 36 active regression tests pass; the original 100 pending specs remain a coverage
+> backlog. Merge scalability, historical/uncertain dates and correction history remain open.
 
 ---
 
@@ -37,18 +34,14 @@ docs/decentralized-binding.md    a deferred alternative topology, written up but
 
 ## What is core, and why
 
-A registry that drops any of the following stops being a *record* and becomes a pile of
-assertions. That is the test each rule had to pass.
-
-| Rule | Without it |
+| Rule | Meaning |
 | --- | --- |
-| **Sexed parentage** — a sire is male, a dam is female | the pedigree is not a pedigree |
-| **All-or-nothing parentage** — both parents or neither | "no parents" and "one parent" become indistinguishable |
-| **Write-once** — recorded parentage is never overwritten | history is editable |
-| **Chronology** — both parents born strictly before the offspring | a foal can precede its own sire |
-| **Consent** — naming a token as a parent needs its owner's permission | anyone can hang their animal off your champion |
-
-The four modules, by contrast, each answer a question some registries never ask.
+| **Sexed parentage** | Every supplied sire is male; every supplied dam is female |
+| **Partial knowledge** | Either slot may be zero, meaning no recorded parent |
+| **Write-once slots** | Ordinary writes only fill empty slots; merge is the explicit exception |
+| **Chronology** | Each parent has an immutable birth timestamp strictly earlier than the child |
+| **Consent** | Every newly supplied parent requires its current owner's permission |
+| **Local identity** | Nonzero token IDs are never reused, including after burning or merging |
 
 ### The node
 
@@ -67,45 +60,47 @@ Folding the birth date into the node rather than a side mapping is what makes da
 the slot holding `isMale` is written at registration anyway, and a parent's date is read from a
 slot the sex check has already warmed. A **founder** writes exactly one slot.
 
-### All-or-nothing parentage
+### Independently optional parentage
 
-`(sireId == 0) == (damId == 0)` always holds. A token is either a founder — the root of a tree —
-or it has *both* parents. Half a pair is never recordable.
+`(0, 0)` means a founder: no parentage recorded. `(sireId, 0)` and `(0, damId)` record one known
+parent without fabricating another animal's identity or birth date. `(sireId, damId)` records both.
+Unknown does not mean biologically absent. This remains a two-slot reproduction model; partial
+knowledge does not add support for cloning or other reproduction models.
 
-Every animal descends from exactly one male and one female. Recording only one states half a fact
-while looking like a whole one, and it gives "does this node have parents?" three answers instead
-of two, which every consumer then has to handle.
+With `LateParentage`, each missing slot can be filled later. For example, after registering
+`(42, 0)`, call `attachParentage(childId, 0, 57)`. Zero leaves that slot unchanged; supplying a
+nonzero value for an already-filled slot reverts even if it repeats the existing ID. Supplying
+`(0, 0)` to attachment also reverts. Registration and attachment are atomic.
 
-**When only one parent is genuinely documented**, the sanctioned pattern is a **phantom
-placeholder**: register an unnamed founder of the missing sex and pair against it. The known
-parent is preserved, the invariant holds, and the gap is visible as a nameless node instead of
-hiding inside a half-filled record. This is what paper studbooks have always done.
+### Acyclicity follows from chronology
 
-### Acyclicity is free
+Every parent edge requires `birth(parent) < birth(child)`. A cycle would require
+`birth(A) < birth(B) < ... < birth(A)`, which is impossible. Birth timestamps are immutable and
+every graph mutation must preserve this inequality, including merges.
 
-Requiring parents to pre-exist, plus monotonically increasing token IDs, means **a parent's ID is
-always lower than its offspring's**. Following parent edges strictly decreases the token ID, so a
-cycle cannot exist and an upward walk always terminates.
+This proof also covers late attachment when the parent has a higher token ID than the child.
+No ancestry walk or generation cap is needed for attachment. A lower proposed parent ID alone
+is not a proof once existing late attachments can violate ID ordering.
 
-The chronology rule is *not* what buys this. It buys the stronger, **semantic** guarantee that the
-pedigree describes something that could have happened in the physical world — which for a studbook
-is the single most common form of bad data, and the reason it sits in core rather than in a module.
-
-The one operation that can break the ID ordering is attaching parentage *after* registration,
-since the attached parent may hold a higher ID. That is exactly why late parentage is a module,
-and why it carries its own cycle guard.
+The reference allocates sequential IDs, but this is not a standard requirement. `nextTokenId()`
+remains a convenience getter on the implementation and is excluded from `ILineageRegistry`.
+Parents must exist locally when an edge is recorded; registration order does not imply birth order.
 
 ### Consent: the two grants
 
-- **Per-token** — "*this* stud may be named as a parent by *this* address."
+- **Per-token** — "*this* stud may be named as a parent by *this* address." These grants expire
+  on ownership change or burn and never revive if a previous owner reacquires the token.
 - **Blanket** — "this address may name *any* token I own as a parent." It follows the **owner**,
   not the token, so it covers animals acquired after the grant and lapses the instant a token is
   sold, because the new owner's grants apply instead. Right default for a working farm: the herd
   turns over constantly, the relationship with the association does not.
 
-An owner never needs a grant to name their own tokens. Child-side consent — delegating the right
-to record ancestry *onto* your token — lives in `LateParentage`, because at registration the child
-does not exist yet and so has no owner to ask.
+An owner never needs a grant to name their own tokens. Child-side consent lives in
+`LateParentage` and follows the same invalidation rule. Self-transfers preserve lineage grants.
+ERC-721 operator approvals do not confer parentage permission. Revoking permission affects new
+edges only; completing the other slot does not require renewed consent for an existing edge.
+Ownership generations invalidate grants in constant time, with no linker enumeration. Indexers
+must treat ownership-changing `Transfer` events as grant invalidations.
 
 `canUseAsParent(parentTokenId, caller)` takes the caller as an **argument** rather than reading
 `msg.sender`, so another contract can ask the question on a third party's behalf. That is a
@@ -117,49 +112,43 @@ deliberate seam; see [Cross-registry linking](#cross-registry-linking).
 
 | Module | Adds | Requires | ERC-165 ID |
 | --- | --- | --- | --- |
-| *(core)* `ILineageRegistry` | the node, sexed pairs, dates, chronology, consent | — | `0xfc68eb2e` |
+| *(core)* `ILineageRegistry` | the node, optional parents, dates, consent | — | `0x8911a112` |
 | `Offspring` | reverse index: `getOffspring`, `offspringCount` | — | `0x698afb25` |
-| `LateParentage` | `attachParentage`, child-side consent, cycle guard | — | `0x311f6e23` |
+| `LateParentage` | `attachParentage`, child-side consent | — | `0x311f6e23` |
 | `Mergeable` | merge primitive + `mergedInto` tombstone | `Offspring` | `0x4205c309` |
 | `Burnable` | leaf-only `burn` with ancestor guard | `Offspring` | `0x42966c68` |
 
 Also required: ERC-721 (`0x80ac58cd`) and ERC-165 (`0x01ffc9a7`).
 
-*(IDs computed from the interfaces and verified against a deployed instance. Not frozen — any
-signature change moves them.)*
+IDs are computed from the interfaces and tested against locally deployed compositions. Reproduce
+with `npx hardhat run scripts/interface-ids.ts`. They are not frozen. The old core ID `0xfc68eb2e`
+is no longer advertised; optional IDs are unchanged, although their documented semantics changed.
 
 ### `Offspring`
 
-Core stores parentage on the child, so the graph is natively walkable *upward* only. This module
-adds the downward direction.
+Core stores parentage on the child. This module adds downward queries with a reverse index, adding
+about 88,814 gas for a two-parent registration in the benchmark below. Each edge updates an array's
+length and stores an element. A one-parent record adds only its one known reverse edge.
 
-**It is the most expensive thing in the standard by a wide margin** — two array pushes, two cold
-`SSTORE`s, ~89,000 gas per parented registration, comfortably more than everything core does put
-together. The same information is fully reconstructible off-chain from `ParentageLinked` events.
-Install it when downward traversal must be answerable *on-chain*, and not otherwise. `Mergeable`
-and `Burnable` both depend on it, because neither can find a node's children without it.
+The graph is reconstructible from events: `ParentageLinked` contains the complete resulting pair,
+including unchanged slots and merge rewrites. Replace the prior pair, skipping zero IDs; do not
+blindly append both IDs on each event. ERC-721 burns remove the record and its parent edges.
+`getOffspring` ordering is unspecified because removal uses swap-and-pop. Reads return the full
+array, and removal scans it linearly; large lists remain a limitation.
 
 ### `LateParentage`
 
-Promotes a **founder** to a parented node: the foal is registered at birth, the sire confirmed
-weeks later by a paternity test. Both parents at once, once, never overwriting — so it can only
-add information, and core's pair rule survives it intact.
-
-This is the module that can break acyclicity, so it pays for what it permits: it walks each
-proposed parent's ancestry and rejects the attachment if the child appears in it. It also refuses
-self-parenting explicitly — the ancestor walk alone would *not* catch a token naming itself as its
-own sire when it is still a founder, and the sex check cannot either, since a male token is a
-perfectly valid sire.
-
-Bolting it on takes one line of inheritance. It overrides nothing: `attachParentage` routes
-through the same `_writeParents` choke point registration uses, so the pair rule, sex typing,
-chronology and parent-side consent all apply without being restated.
+Fills one or both empty slots after registration. Child authorization and each newly supplied
+parent's consent are required. Core enforces write-once slots, sex, existence and chronology.
+There is no recursive ancestry walk: its work does not grow with pedigree depth. An attachment
+emits the complete resulting parent pair, while the reverse index adds only new edges.
 
 ### `Mergeable`
 
 Folds a duplicate into a survivor, re-points the duplicate's offspring, burns it. Same sex
-required; ancestor/descendant merges refused; the survivor is authoritative on parentage and a
-genuine conflict reverts rather than silently discarding one account of the ancestry.
+required; ancestor/descendant merges refused as an identity policy. Each slot is reconciled
+independently: the survivor retains its known parent, adopts a missing parent from the duplicate,
+and rejects two different known IDs in the same slot. Unknown slots do not conflict.
 
 Two rules exist because two records of one animal routinely disagree about its birth date:
 
@@ -174,10 +163,11 @@ certificate or listing still naming that ID becomes a dangling reference; this l
 forward instead. It deliberately outlives the burn, and chains — follow it repeatedly until it
 returns 0.
 
-The primitive is `internal`: **who may merge is a domain question**, and baking one answer in
-would make the module wrong for every other. The re-pointing writes parent pointers directly
-rather than through the ordinary path, so consent is *not* re-consulted for edges that already
-existed and were already agreed to.
+The primitive is `internal`: who may merge is domain policy. Merge is the explicit exception to
+write-once parent pointers. It does not re-consult individual parent grants; its caller must gate
+merge authorization. Every changed node emits `ParentageLinked`, and `NodesMerged` records the
+forwarding tombstone. The reference still walks ancestors for its identity policy, rewrites all
+children, and scans the duplicate's parents' child lists. These operations remain unbounded.
 
 ### `Burnable`
 
@@ -195,36 +185,21 @@ Measured on the reference stacks in `contracts/bench/`, optimizer at 200 runs. R
 
 | Stack | Deployed bytecode | `register` founder | `register` 2 parents |
 | --- | ---: | ---: | ---: |
-| core only | 7,865 | 99,131 | **138,516** |
-| + `Offspring` | 8,340 | 99,176 | 227,269 |
-| + `LateParentage` | 9,362 | 99,176 | 227,308 |
-| + `Mergeable`, `Burnable` | 11,680 | 99,154 | 227,286 |
-| **`PedigreeRegistry`** (all modules + breeds) | **19,123** | 138,052 | **266,415** |
+| core only | 8,313 | 99,251 | 139,131 |
+| + `Offspring` | 8,813 | 99,296 | 227,945 |
+| + `LateParentage` | 9,457 | 99,296 | 227,984 |
+| + `Mergeable`, `Burnable` | 12,185 | 99,274 | 227,962 |
+| **`PedigreeRegistry`** | **19,908** | **138,355** | **267,043** |
 
-The founder column moves by a few gas between runs — the benchmark derives its birth timestamp
-from the current block, and how many zero bytes that value has in calldata is worth 12 gas each.
-The two-parent column is stable.
+Measured for this review revision with Solidity 0.8.28, optimizer at 200 runs. Small calldata
+zero-byte differences in the block-derived birth timestamp can change gas between runs. The two
+parents in this benchmark have no prior offspring; later array appends can have different costs.
 
-Three things to read from this:
-
-- **Not installing is where the win is.** A core-only registry is **59% smaller** than the full
-  composition and registers a two-parent token for **138k gas against 266k — 48% cheaper**. Almost
-  the entire jump is `Offspring`'s two `SSTORE`s: **+88,753 gas**, the honest cost of on-chain
-  downward traversal and precisely what you avoid by leaving it out.
-- **`LateParentage`, `Mergeable` and `Burnable` are free on the hot path** — +39 and −22 gas, i.e.
-  noise. They add entry points, not work at registration. Only bytecode grows.
-- **Folding rules into core beats modularizing them.** Against the previous
-  [`lineageRegistryModules`](#branches) branch, where dates and consent were separate modules, the
-  identical feature set now costs **266,415 vs 272,542 gas (−2.3%)** for +172 bytes. The saving is
-  the birth date's own `SSTORE` (~22k), partly given back by a registration event core did not
-  previously emit. Modest — but it goes the right way, and the contract is simpler.
-
-The general lesson: **`super`-chaining is not what costs gas — features are.** Composition is by
-overriding real `virtual` internals, the pattern OZ v5 uses for `ERC721._update`, **not** by empty
-hook functions. An unused hook still costs a jump; a virtual function that does actual work costs
-nothing extra, and `super` resolves statically at compile time, so there is no dynamic dispatch.
-`_writeParents` is the single choke point both write paths funnel through, so a module that
-overrides it is automatically correct for registration *and* late attachment.
+The reverse index adds 88,814 gas over core on this workload. Core-only registration is about
+48% cheaper than the full domain composition; deployed bytecode is about 58% smaller. LateParentage
+adds functionality without a material registration cost. Compared with the earlier revision,
+core two-parent registration changed from 138,516 to 139,131 gas and the full domain composition
+from 266,415 to 267,043 gas. These measurements are local and do not update the old deployment.
 
 ---
 
@@ -243,16 +218,15 @@ would stop being enforceable.
 
 ### Breeds
 
-`Purebred` requires both parents to share the breed; founders always pass, so an animal with
+`Purebred` requires each recorded parent to share the breed; founders always pass, so an animal with
 undocumented ancestry stays registerable — the rule constrains what you assert, not what you omit.
 `Open` accepts any parents, which is how crossbreeds and breeds-in-formation are represented.
 `setBreedActive(id, false)` closes a breed to *new* registrations without touching existing
 animals.
 
-The breed check runs before core sees the pair, so it deliberately stays silent about anything
-core will reject anyway — a founder, a half-pair, or an ID that is not a live animal. Otherwise a
-missing sire would surface as "different breed" instead of "does not exist", and the misleading
-message would be the only one the caller ever sees.
+The breed check handles each supplied parent independently. Unknown IDs are left for core's
+existence error instead of being mislabeled as breed mismatches. A zero slot carries no breed
+assertion. The same rule applies to late attachment.
 
 ### Registration is permissionless
 
@@ -272,6 +246,9 @@ metadata base URI (`DEFAULT_ADMIN_ROLE`). Neither can touch an animal's genealog
 | `acceptMerge(survivor, duplicate)` | Duplicate's owner | Executes. **Burns the duplicate** |
 | `cancelMerge(duplicate)` | Either party | Withdraws the offer |
 | `mergeOwned(survivor, duplicate)` | Owner of **both** | Skips the round-trip |
+
+Offers expire if either candidate changes owner or is burned, including transfer-away-and-back.
+`pendingMerge` returns zero for expired offers; a fresh proposal is required before acceptance.
 
 `_afterMerge` then migrates the animal record: the survivor is authoritative, but a duplicate
 usually exists precisely *because* it holds the half of the record the survivor lacks, so
@@ -365,51 +342,45 @@ The compiler tells you which, and `contracts/bench/BenchStacks.sol` shows both c
 
 ### Testing
 
-`test/PedigreeRegistry.ts` ships a **working fixture** and 100 pending specs mapping the behaviour
-to cover. `npx hardhat test` is green and reports them as pending, so the file is an accurate
-to-do list rather than a false green.
+`npx hardhat test` runs **36 active regression tests** in `test/LineageDecisions.ts`. They cover
+partial registration and attachment, consent invalidation (including round trips), full event
+reconstruction, partial merge reconciliation, burn cleanup, breed rules and interface discovery.
+A 64-generation pedigree exercises attachment without an ancestry walk.
 
-Core, every module and the domain contract have each been exercised end-to-end against a deployed
-instance — 42 assertions covering the invariants, the pair rule, chronology, both consent layers,
-the cycle and self-parent guards, the merge tombstone and ERC-165 hygiene. Writing the specs is
-what remains. Note the bare `.to.be.reverted` matcher is deprecated in this toolbox version: use
-`.to.be.revertedWith("message")` or `.to.be.revert(ethers)`.
-
----
+`test/PedigreeRegistry.ts` preserves the original **100 pending specs** as a broader coverage
+backlog. Hardhat's final aggregate includes pending entries; use Mocha's passing/pending counts
+rather than interpreting that aggregate as executed assertions. This is not a complete audit.
+Run `npm run typecheck` for compilation and TypeScript checking.
 
 ## Known limitations and open questions
 
-- **Two unbounded ancestor walks**, both reachable from state-changing calls:
-  `LateParentage.attachParentage` and `Mergeable._mergeLineage`. On a deep pedigree either can
-  exhaust gas, which would make those operations *permanently impossible* on exactly the old,
-  well-documented lines where they matter most. A cheap partial fix exists for the attach case —
-  when `parentId < childId` the ID ordering already guarantees safety and the walk can be skipped
-  — which would cover the common path. The merge case needs a depth cap or an off-chain proof.
-- **The pair rule forces phantom placeholders.** A breeder with a documented sire and an unknown
-  dam must register a nameless founder dam to record the sire at all. This is deliberate and
-  matches studbook practice, but it means registries will accumulate placeholder nodes, and
-  nothing in the standard marks one as such — an `isPlaceholder` flag or a naming convention is a
-  domain-layer decision left open.
-- **`approveParentageLinkageBatch` loops over caller-supplied input** with no length bound. Only
-  the caller pays, but it can be made to fail.
-- **`isMale` returns `false` for tokens that do not exist**, so "female" and "absent" are
-  indistinguishable without a separate existence check. An `enum Sex { Unknown, Male, Female }`
-  would fix it at the cost of a core ABI change.
-- **Module dependencies are documentation, not compilation.** `Mergeable` and `Burnable` inherit
-  `Offspring` so those two are enforced, but nothing stops a composition that is semantically odd
-  in other ways.
-- **Revert strings, not custom errors.** Custom errors would shave real bytecode off every
-  contract here. Kept as strings for legibility while the standard is still being drafted.
-- **Sex is a single boolean.** Species with other reproductive models are out of scope by design —
-  worth stating explicitly in the ERC rather than leaving implicit.
-- **No interface is frozen.** Every ID above moves if a signature changes.
+- **Merge scalability:** ancestor-policy walks, child rewrites and offspring removal scans remain
+  unbounded. Leaf burns can also scan large parent offspring lists. No new depth cap was added.
+- **Dates:** positive `uint64` Unix seconds exclude pre-1970 dates and cannot express unknown or
+  approximate birth dates. A new representation needs an explicit chronology policy.
+- **Corrections:** ordinary parent slots, dates and sex cannot be corrected. Merge rejects
+  conflicting known parents; auditable supersession remains a design question.
+- **Federation:** references are local. Separate attestations/indexers are the proposed next step;
+  mirrors and widened references remain unimplemented. Local acyclicity does not prove acyclicity
+  after records from multiple registries are identified as the same animal.
+- **Identity and evidence:** permission is not biological verification, and the same animal can
+  still have multiple records. External certification/evidence policy belongs above core.
+- **Large reads/batches:** callers must chunk `getNodesBatch`; `getOffspring` returns a full array.
+- **Compatibility:** interface semantics and the core ID changed. Existing contracts are not
+  upgraded by these source changes; clients must distinguish the earlier deployment.
+- **Sex:** known male/female remains required; unknown sex and other reproduction models are out
+  of scope. Missing scalar node reads revert; missing batch records are zero-filled.
+- **Interfaces are not frozen**, and revert strings remain intentional during review.
 
 ## Roadmap
 
-- [ ] Fill in the test suite per layer
-- [ ] Bound or replace the two ancestor walks
-- [ ] Decide the `Sex` enum question before freezing core's ABI
-- [ ] Evaluate the [decentralized binding](docs/decentralized-binding.md) topology on its own branch
+- [x] Represent independently missing parents without placeholders
+- [x] Use chronology for late-attachment acyclicity
+- [x] Invalidate token grants and merge offers on ownership changes
+- [x] Specify missing-record reads and recompute core's ERC-165 ID
+- [ ] Complete the broader test backlog
+- [ ] Define scalable merge reconciliation and historical/uncertain dates
+- [ ] Define auditable correction and federation semantics
 - [ ] Freeze the interfaces and submit as an ERC
 
 ## Branches
@@ -418,7 +389,7 @@ what remains. Note the bare `.to.be.reverted` matcher is deprecated in this tool
 | --- | --- |
 | `lineageRegistryFullV1` | The original monolithic contract, project-ified. Kept as the benchmark baseline |
 | `lineageRegistryModules` | Core + six modules. Over-split: dates and consent should not have been optional |
-| `lineageRegistryCore` | **This work.** Core carries the five non-negotiable rules; four modules remain |
+| `lineageRegistryCore` | **This work.** Core carries chronology, optional write-once slots and consent; four modules remain |
 
 ## License
 

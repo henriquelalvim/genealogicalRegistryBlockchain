@@ -19,7 +19,7 @@ import "../modules/LineageRegistryLateParentage.sol";
 import "../modules/LineageRegistryMergeable.sol";
 import "../modules/LineageRegistryBurnable.sol";
 
-/// Core only — sexed pairs, dates, chronology and consent, and nothing else.
+/// Core only — optional sexed parents, dates, chronology and consent, and nothing else.
 contract BenchCore is LineageRegistry {
     constructor() ERC721("Bench", "B") {}
 

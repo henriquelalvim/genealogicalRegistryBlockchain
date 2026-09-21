@@ -16,12 +16,10 @@ import "../interfaces/ILineageRegistryOffspring.sol";
  *         registration and parentage attached later — without knowing that late attachment
  *         exists.
  *
- * @dev **This is the most expensive thing in the standard.** Two array pushes per parented
- *      registration — two cold `SSTORE`s — cost roughly 89,000 gas, comfortably more than
- *      everything core does put together. It is a module for exactly that reason: the same
- *      information is fully reconstructible off-chain from {ParentageLinked} events, so a
- *      registry that does not need to answer "who are this stallion's foals?" *on-chain* should
- *      not install it and should not pay for it.
+ * @dev A two-parent registration adds two array pushes (each writes length and an element),
+ *      about 89,000 gas in the benchmark. A partially recorded pedigree adds only its known edge.
+ *      Consumers may instead reconstruct state from complete-pair ParentageLinked events and
+ *      ERC-721 burns. Repeated events replace prior edges; merge rewrites are emitted as well.
  *
  *      {LineageRegistryMergeable} and {LineageRegistryBurnable} both require it, because neither
  *      can find a node's children without the index.
@@ -31,13 +29,13 @@ abstract contract LineageRegistryOffspring is ILineageRegistryOffspring, Lineage
     ///      removed only by the merge and burn modules, which detach a node from its parents.
     mapping(uint256 => uint256[]) internal _offspring;
 
-    /// @dev Records both reverse edges. Core guarantees parentage arrives as a complete pair, so
-    ///      there is no partial case to handle.
+    /// @dev Indexes only newly supplied edges. Zero slots are skipped, so completing parentage
+    ///      later cannot insert an existing edge twice.
     function _writeParents(uint256 tokenId, uint256 sireId, uint256 damId) internal virtual override {
         super._writeParents(tokenId, sireId, damId);
 
-        _offspring[sireId].push(tokenId);
-        _offspring[damId].push(tokenId);
+        if (sireId != 0) _offspring[sireId].push(tokenId);
+        if (damId != 0) _offspring[damId].push(tokenId);
     }
 
     /// @dev Removes `childId` from `parentId`'s offspring list by swap-and-pop.

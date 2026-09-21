@@ -4,7 +4,7 @@ import { network } from "hardhat";
 const { ethers, networkHelpers } = await network.create();
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Status: scaffolding only.
+// Status: additional coverage backlog; active revision regressions are in LineageDecisions.ts.
 //
 // The specs below are grouped by the layer that owns each behaviour — core first, then one
 // block per module — so that a test failing tells you immediately which contract to open, and
@@ -25,8 +25,8 @@ const { ethers, networkHelpers } = await network.create();
 // The bare `.to.be.reverted` matcher is deprecated in this toolbox version — use
 // `.to.be.revertedWith("...")` for a message, or `.to.be.revert(ethers)` for a bare revert.
 //
-// Core, every module and the domain contract have each been exercised end-to-end against a
-// deployed instance (42 assertions, all passing); the pending specs are the only thing missing.
+// The previous deployment had manual checks. Active revision regressions now live in
+// LineageDecisions.ts; this file preserves the broader coverage backlog explicitly as pending.
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** A birth date safely in the past, so registrations never trip the future-birth guard. */
@@ -94,11 +94,11 @@ describe("LineageRegistry (core)", function () {
     it("rejects a parent that does not exist");
   });
 
-  describe("all-or-nothing parentage", function () {
+  describe("independently optional parentage", function () {
     it("registers a founder with both slots at 0");
-    it("rejects a sire with no dam");
-    it("rejects a dam with no sire");
-    it("never records a node whose sire is set and dam is not, or vice versa");
+    it("registers a sire with no dam");
+    it("registers a dam with no sire");
+    it("distinguishes each partially recorded parent pair from a founder");
   });
 
   describe("birth dates and chronology", function () {
@@ -124,7 +124,7 @@ describe("LineageRegistry (core)", function () {
   });
 
   describe("acyclicity by construction", function () {
-    it("assigns every parent a lower token ID than its offspring");
+    it("requires every recorded parent to have an earlier birth timestamp");
     it("cannot express a cycle through registration alone");
   });
 
@@ -132,7 +132,7 @@ describe("LineageRegistry (core)", function () {
     it("getParents reverts for a token that does not exist");
     it("getNode returns sire, dam, birth date and sex in one call");
     it("getNodesBatch zero-fills tokens that do not exist rather than reverting");
-    it("isMale returns false for a token that does not exist, same as for a female");
+    it("isMale reverts for a token that does not exist");
     it("walks a three-generation pedigree breadth-first with getNodesBatch");
   });
 
@@ -156,7 +156,7 @@ describe("module: LateParentage", function () {
   it("advertises its interface id");
   it("promotes a founder to a parented node");
   it("refuses to overwrite parentage that is already recorded");
-  it("rejects an attach with either slot at zero");
+  it("rejects an attach with both supplied slots at zero");
   it("rejects an attach from someone who is neither the child's owner nor an approved linker");
   it("accepts an attach from a child-side approved linker");
   it("still enforces parent-side consent, sex and chronology through core");
@@ -214,9 +214,9 @@ describe("PedigreeRegistry (domain)", function () {
     it("lets core's error win when a parent does not exist, rather than reporting a breed mismatch");
   });
 
-  describe("phantom placeholders", function () {
-    it("pairs a documented sire against a nameless founder dam");
-    it("keeps such a placeholder usable as a parent for later offspring");
+  describe("incomplete parentage", function () {
+    it("records a documented sire without fabricating a dam");
+    it("fills the missing dam once she is documented");
   });
 
   describe("merge consent", function () {

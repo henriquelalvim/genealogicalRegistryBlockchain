@@ -15,15 +15,18 @@ pragma solidity ^0.8.28;
  * ## Rules enforced by the primitive
  *
  * - **Same sex.** Merging across sexes would corrupt the sire/dam typing of every child.
- * - **Survivor is authoritative on parentage.** If the survivor is a founder it adopts the
- *   duplicate's parents — re-validated against the survivor's own birth date, since the two
- *   records may disagree about it. If both have parents and they *differ*, the merge reverts: a
- *   real contradiction about ancestry is a human problem, and silently picking a winner destroys
- *   evidence.
+ * - **Per-slot reconciliation.** The survivor retains each known parent and adopts each missing
+ *   parent from the duplicate. Two different known IDs in the same slot MUST revert. Adopted
+ *   edges MUST be revalidated against the survivor's immutable birth date. Unknown slots do not
+ *   conflict. ParentageLinked MUST report each adopted or redirected node's resulting pair.
  * - **Survivor is no younger than the duplicate.** Two records of one animal routinely disagree
  *   on its birth date; keeping the earlier is the conservative choice, and it is what guarantees
  *   that no re-pointed child ends up older than its own parent.
- * - **No ancestor/descendant merges**, which would create a cycle.
+ * - **No ancestor/descendant merges**, an identity policy in addition to chronology's cycle proof.
+ *
+ * This is the explicit exception to ordinary write-once parent pointers. The reference still
+ * performs unbounded ancestry walks, child rewrites and offspring-array scans. It provides no
+ * guarantee that every valid merge fits the block gas limit; scalable reconciliation is open.
  *
  * ## What this module does not decide
  *

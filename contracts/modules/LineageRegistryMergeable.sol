@@ -46,8 +46,8 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
         require(_ownerOf(duplicateId) != address(0), "Duplicate does not exist");
         require(_nodes[survivorId].isMale == _nodes[duplicateId].isMale, "Sex mismatch between merge candidates");
 
-        // The two nodes must not be in an ancestor/descendant relationship, or re-pointing would
-        // close a loop in the DAG.
+        // Identity policy: a recorded ancestor and descendant cannot be the same individual.
+        // Chronology separately guarantees acyclicity; these policy walks remain unbounded.
         require(!_isAncestor(survivorId, duplicateId), "Survivor is an ancestor of duplicate");
         require(!_isAncestor(duplicateId, survivorId), "Duplicate is an ancestor of survivor");
 
@@ -64,25 +64,23 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
             "Survivor recorded as born after duplicate"
         );
 
-        // Parentage reconciliation. The survivor is authoritative: if it is a founder it adopts
-        // the duplicate's parents; if both sides have parents and they disagree, refuse rather
-        // than silently discard one account of the animal's ancestry. The pair invariant means an
-        // empty sire slot implies an empty dam slot, so one test settles which case applies.
-        if (s.sireId == 0) {
-            if (d.sireId != 0) {
-                // Those parents were validated against the *duplicate's* birth date, which may
-                // differ from the survivor's. Re-check before adopting them, or the merge could
-                // manufacture a pedigree that registration would have rejected. Consent is
-                // deliberately not re-consulted; see the note above.
-                _requireValidParents(d.sireId, d.damId, s.birthTimestamp);
-
-                s.sireId = d.sireId;
-                s.damId = d.damId;
-                _offspring[d.sireId].push(survivorId);
-                _offspring[d.damId].push(survivorId);
-            }
-        } else if (d.sireId != 0) {
-            require(s.sireId == d.sireId && s.damId == d.damId, "Parentage conflict");
+        // Reconcile each slot independently. Unknown is not a conflicting assertion; two
+        // different known IDs are. Newly adopted edges must fit the survivor's immutable date.
+        require(s.sireId == 0 || d.sireId == 0 || s.sireId == d.sireId, "Parentage conflict");
+        require(s.damId == 0 || d.damId == 0 || s.damId == d.damId, "Parentage conflict");
+        uint256 adoptedSire = s.sireId == 0 ? d.sireId : 0;
+        uint256 adoptedDam = s.damId == 0 ? d.damId : 0;
+        _requireValidParents(adoptedSire, adoptedDam, s.birthTimestamp);
+        if (adoptedSire != 0) {
+            s.sireId = adoptedSire;
+            _offspring[adoptedSire].push(survivorId);
+        }
+        if (adoptedDam != 0) {
+            s.damId = adoptedDam;
+            _offspring[adoptedDam].push(survivorId);
+        }
+        if (adoptedSire != 0 || adoptedDam != 0) {
+            emit ParentageLinked(survivorId, s.sireId, s.damId);
         }
 
         // Re-point every child of the duplicate at the survivor.
@@ -94,8 +92,8 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
             bool dupIsSire = c.sireId == duplicateId;
             bool dupIsDam = c.damId == duplicateId;
 
-            // A child parented by BOTH tokens would end up self-parented. Unreachable given the
-            // same-sex requirement above, but kept as a defensive guard.
+            // A child using both candidates would collapse two parent slots onto one token.
+            // Same-sex validation already makes that unreachable in a conforming graph.
             require(
                 !(dupIsSire && c.damId == survivorId) && !(dupIsDam && c.sireId == survivorId),
                 "Merge would self-parent an offspring"
@@ -105,14 +103,13 @@ abstract contract LineageRegistryMergeable is ILineageRegistryMergeable, Lineage
             if (dupIsDam) c.damId = survivorId;
 
             _offspring[survivorId].push(childId);
+            emit ParentageLinked(childId, c.sireId, c.damId);
         }
         delete _offspring[duplicateId];
 
         // Detach the duplicate from its own parents' offspring lists.
-        if (d.sireId != 0) {
-            _removeOffspring(d.sireId, duplicateId);
-            _removeOffspring(d.damId, duplicateId);
-        }
+        if (d.sireId != 0) _removeOffspring(d.sireId, duplicateId);
+        if (d.damId != 0) _removeOffspring(d.damId, duplicateId);
 
         _burn(duplicateId);
         delete _nodes[duplicateId];

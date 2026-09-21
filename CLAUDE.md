@@ -22,7 +22,7 @@ npm install
 npx hardhat compile                      # also regenerates types/ (typechain)
 npx hardhat test                         # all specs
 npx hardhat test test/PedigreeRegistry.ts        # one file
-npx hardhat test --grep "all-or-nothing"         # one spec / block
+npx hardhat test --grep "parentage"         # one spec / block
 npm run typecheck                        # hardhat compile && tsc --noEmit
 npx hardhat run scripts/bench.ts         # size + gas table (see below)
 npx hardhat clean
@@ -45,37 +45,45 @@ Four layers, most abstract first:
 
 ```
 contracts/interfaces/    ILineageRegistry (core) + one interface per module; ERC-165 IDs
-contracts/LineageRegistry.sol            abstract core — the five non-negotiable rules
+contracts/LineageRegistry.sol            abstract core — parentage, chronology and consent
 contracts/modules/       Offspring, LateParentage, Mergeable, Burnable — abstract, opt-in
 contracts/PedigreeRegistry.sol           concrete: installs all four + breeds/animals/merge consent
 contracts/bench/BenchStacks.sol          minimal stacks used only by scripts/bench.ts
 ```
 
-### The five core rules
+### Core rules after the September 2026 review
 
-Core owns exactly these, and each one is load-bearing. Weakening any of them is a change to the
-standard, not a refactor:
+1. **Sexed parentage:** a supplied sire is male, a supplied dam female. Known binary sex remains
+   required and immutable; scalar sex queries revert for absent/burned tokens.
+2. **Independently optional slots:** zero means unrecorded. A founder has both slots zero; one
+   documented parent needs no fabricated placeholder. Ordinary writes fill each slot at most once.
+3. **Local, existing parents:** a supplied parent must exist in this registry at edge creation.
+4. **Immutable chronology:** reported birth dates are nonzero, not future-dated at creation, and
+   each parent is strictly older than its child. Historical/uncertain date support is still open.
+5. **Consent:** every newly supplied parent requires its current owner's permission. Completing
+   the other slot does not re-check old edges. ERC-721 approvals do not grant lineage permission.
+6. **Identity:** zero IDs are reserved and IDs never reused. Sequential allocation remains an
+   implementation convenience; nextTokenId is no longer part of ILineageRegistry.
 
-1. **Sexed parentage** — sire is male, dam is female.
-2. **All-or-nothing parentage** — `(sireId == 0) == (damId == 0)`. A token is a founder or has
-   both parents; half a pair is unrepresentable. One documented parent is recorded via a *phantom
-   placeholder* founder of the missing sex.
-3. **Parents pre-exist** at registration.
-4. **Write-once** — recorded parentage is never overwritten or cleared.
-5. **Chronology** — both parents born strictly before the offspring; no future births.
+LateParentage supplies child authorization and routes through _writeParents. Zero arguments leave
+slots unchanged; nonzero arguments targeting any recorded slot revert, including repeats. Empty
+attachment reverts. ParentageLinked always reports the complete resulting pair. Offspring indexes
+only the newly supplied edges. Merge is the documented exception to write-once pointers; it
+reconciles each slot separately and emits the complete pair for each changed node.
 
-Plus **consent**: naming someone else's token as a parent needs that owner's permission.
+Per-token parent/child grants and merge proposals are bound to _ownershipEpoch. Ownership changes
+and burns invalidate them, including transfer away and back; self-transfers preserve them. Blanket
+grants continue to follow the owner. Indexers observe invalidation through Transfer events.
 
-### Acyclicity is structural, not checked
+### Acyclicity follows from chronology
 
-Parents must pre-exist and IDs increase monotonically ⇒ a parent's ID is always lower ⇒ following
-parent edges strictly decreases the ID ⇒ no cycles, and every upward walk terminates. Chronology
-does **not** buy this; it buys the semantic guarantee.
+Immutable birth timestamps strictly decrease along every ancestry edge, so a cycle is impossible.
+Late attachment needs no recursive ancestor walk and token IDs need not decrease. Every extension
+must preserve this inequality on every mutation. A lower proposed parent ID alone is not a proof.
 
-`LineageRegistryLateParentage` is the one thing that can break the ID-ordering argument (an
-attached parent may hold a higher ID), which is exactly why it is a module and why it carries its
-own `_isAncestor` cycle guard. Anything else that writes parent pointers outside `_registerNode`
-inherits that obligation.
+Merge retains the separate identity policy rejecting ancestor/descendant reconciliation; its
+_isAncestor walks remain unbounded, as do child rewriting and linear offspring removals. Do not
+claim that merge scaling has been solved by removing the late-attachment walk.
 
 ### How modules compose
 
@@ -114,10 +122,9 @@ it silently costs an `SSTORE` per registration.
 
 - The domain contract adds rules; it **never restates core's**. Breed compatibility is its only
   genealogical rule.
-- Domain checks that run *before* core must stay silent about anything core will reject —
-  `_requireBreedCompatible` early-returns on founders, half-pairs and unknown IDs so core's
-  clearer error surfaces instead. Violating this produces misleading revert messages, which has
-  already been a bug here once.
+- `_requireBreedCompatible` checks each supplied parent separately. Unknown IDs are left to
+  core's existence errors; zero slots carry no breed assertion. Partial pedigrees must not bypass
+  Purebred policy.
 - Consent for merges is domain policy on purpose: `_mergeLineage` is `internal` and pairs with
   `_afterMerge`, which the module does not chain itself.
 
@@ -125,10 +132,10 @@ it silently costs an `SSTORE` per registration.
 
 - **Hardhat 3 + ESM.** Tests and scripts use `await network.create()` at top level, **not** the
   deprecated `network.connect()`.
-- **Tests are structure-only by design.** `test/PedigreeRegistry.ts` has a working `deployFixture`
-  and ~100 pending specs (an `it(...)` with no callback). `npx hardhat test` is green and reports
-  them as pending — an accurate to-do list rather than a false green. Do not delete pending specs
-  to make output cleaner; fill them in.
+- **Tests:** `test/LineageDecisions.ts` contains active behavioral regressions for the revision.
+  `test/PedigreeRegistry.ts` preserves 100 pending coverage-backlog specs. Do not delete pending
+  specs to make output cleaner. Hardhat's aggregate includes pending entries; report Mocha's
+  actual passing/pending counts. Graph and authorization changes need meaningful regressions.
 - The bare `.to.be.reverted` matcher is deprecated in this toolbox version — use
   `.to.be.revertedWith("message")` or `.to.be.revert(ethers)`.
 - **Revert strings, not custom errors**, deliberately, for legibility while the standard is being
@@ -138,8 +145,8 @@ it silently costs an `SSTORE` per registration.
   jitters ±12 gas between runs (calldata zero-byte cost on a block-derived timestamp); the
   two-parent column is stable. `BenchStacks.sol` must be kept in sync when `_registerNode`'s
   signature changes.
-- **ERC-165 IDs are computed from the interfaces and documented in `README.md`.** Any signature
-  change moves them; recompute and update the table.
+- **ERC-165 IDs are computed from the interfaces and documented in `README.md`.** Use
+  `npx hardhat run scripts/interface-ids.ts` after signature changes and update the table.
 - **Licensing is settled and split.** Code is MIT (repo `LICENSE` + every contract's SPDX header),
   matching the convention for ERC reference implementations. The ERC document under `docs/` is
   **CC0-1.0**, because EIP-1 requires it. Keep them distinct — a contributor "unifying" them
@@ -154,4 +161,4 @@ across them:
 | --- | --- |
 | `lineageRegistryFullV1` | Original monolith, project-ified. Benchmark baseline |
 | `lineageRegistryModules` | Core + six modules. Over-split — dates and consent should not have been optional |
-| `lineageRegistryCore` | Current. Core carries the five rules; four modules remain |
+| `lineageRegistryCore` | Current. Core carries optional write-once parents, chronology and consent; four modules remain |
