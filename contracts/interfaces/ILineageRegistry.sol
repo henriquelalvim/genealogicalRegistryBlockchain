@@ -15,11 +15,17 @@ pragma solidity ^0.8.28;
  *   needed to record one known parent. Unknown does not assert that no biological parent exists.
  * - Every nonzero sire/dam MUST exist and be male/female respectively. Sex MUST be immutable.
  *   This model requires known binary sex; other reproductive models are outside this revision.
- * - Birth timestamps MUST be immutable, nonzero Unix seconds and not future-dated at creation.
+ * - Birth timestamps MUST be immutable signed int64 Unix seconds, not future-dated at creation.
+ *   Negative values precede 1970-01-01T00:00:00Z; zero is that instant, not an absence marker.
+ *   The full int64 range is available subject to chronology and the no-future rule. Calendar
+ *   conversion is off-chain (UTC/proleptic Gregorian); source-calendar metadata belongs above core.
  *   Every parent MUST have a strictly earlier timestamp than its child. This proves acyclicity
- *   regardless of registration order or token IDs. Historical/uncertain date support is deferred.
+ *   regardless of registration order or token IDs. Unknown/approximate birth dates remain out of scope.
  * - Recorded parent slots MUST NOT be cleared or overwritten by ordinary writes. LateParentage
- *   MAY fill empty slots. Mergeable is the explicit exception for reconciling duplicate records.
+ *   MAY fill empty slots. Mergeable is the explicit exception for reconciling duplicate records,
+ *   and MUST reject conflicting known parents. There is no correction/supersession operation:
+ *   an incorrect recorded parent is not replaceable, including by an administrator. This rule
+ *   concerns assertions; optional leaf burning and identity reconciliation remain explicit modules.
  * - Token IDs MUST be nonzero and MUST NOT be reused, including after burning or merging.
  *   Sequential allocation and a nextTokenId getter are reference-implementation conveniences.
  * - New edges require consent from each supplied parent's current owner. ERC-721 transfer
@@ -45,12 +51,12 @@ interface ILineageRegistry {
     struct Node {
         uint256 sireId;
         uint256 damId;
-        uint64 birthTimestamp;
+        int64 birthTimestamp;
         bool isMale;
     }
 
     /// @notice Emitted on creation with immutable sex and reported birth time.
-    event NodeRegistered(uint256 indexed tokenId, address indexed to, bool isMale, uint64 birthTimestamp);
+    event NodeRegistered(uint256 indexed tokenId, address indexed to, bool isMale, int64 birthTimestamp);
 
     /// @notice Complete resulting parent pair after a mutation. Either slot may be zero.
     ///         Ordinary writes only fill empty slots; Mergeable may redirect existing edges.
@@ -87,7 +93,7 @@ interface ILineageRegistry {
     function isMale(uint256 tokenId) external view returns (bool);
 
     /// @notice Immutable reported birth timestamp. Reverts for nonexistent/burned tokens.
-    function birthTimestampOf(uint256 tokenId) external view returns (uint64);
+    function birthTimestampOf(uint256 tokenId) external view returns (int64);
 
     /// @notice Local parent IDs, independently zero when unrecorded. Reverts for absent tokens.
     function getParents(uint256 tokenId) external view returns (uint256 sireId, uint256 damId);
@@ -95,8 +101,14 @@ interface ILineageRegistry {
     /// @notice Complete node. Reverts for nonexistent/burned tokens.
     function getNode(uint256 tokenId) external view returns (Node memory);
 
-    /// @notice Results match input order, including repeats. Absent tokens yield a zeroed Node;
-    ///         birthTimestamp == 0 distinguishes absence from a live female founder. Empty input
-    ///         returns an empty array. Clients MUST chunk large traversals to suit RPC/gas limits.
-    function getNodesBatch(uint256[] calldata tokenIds) external view returns (Node[] memory);
+    /// @notice True only for a live token. False for zero, never-minted, burned or merged-away IDs.
+    ///         Existence is independent of every birth value, including zero and negative dates.
+    function nodeExists(uint256 tokenId) external view returns (bool);
+
+    /// @notice Parallel arrays match input order, including repeats. found[i] reports live-token
+    ///         existence; absent tokens yield a zeroed Node and false. A live female founder born
+    ///         at the epoch also has a zeroed Node, but found[i] is true. Empty input returns two
+    ///         empty arrays. Clients MUST chunk large traversals to suit RPC/gas limits.
+    function getNodesBatch(uint256[] calldata tokenIds)
+        external view returns (Node[] memory nodes, bool[] memory found);
 }

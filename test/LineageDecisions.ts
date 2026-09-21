@@ -42,9 +42,10 @@ describe("Revised lineage definitions", function () {
       await expect(registry.birthTimestampOf(id)).to.be.revertedWith("Token does not exist");
       await expect(registry.canUseAsParent(id, ethers.ZeroAddress)).to.be.revertedWith("Token does not exist");
     }
-    const nodes = await registry.getNodesBatch([999, 2, 2, 0]);
+    const [nodes, found] = await registry.getNodesBatch([999, 2, 2, 0]);
     expect(nodes.map((node) => node.birthTimestamp)).to.deep.equal([0n, 100n, 100n, 0n]);
-    expect(await registry.getNodesBatch([])).to.deep.equal([]);
+    expect(found).to.deep.equal([false, true, true, false]);
+    expect(await registry.getNodesBatch([])).to.deep.equal([[], []]);
   });
 
   it("enforces existence, sex and chronology for each independently supplied parent", async function () {
@@ -63,10 +64,10 @@ describe("Revised lineage definitions", function () {
     expect(await registry.nextTokenId()).to.equal(3n);
   });
 
-  it("retains the required, nonfuture birth-date policy", async function () {
+  it("permits the Unix epoch and rejects future birth dates", async function () {
     const { registry, owner } = await networkHelpers.loadFixture(fixture);
-    await expect(registry.register(owner.address, 1, 0, 0, true, 0, "", ""))
-      .to.be.revertedWith("Birth timestamp required");
+    await registry.register(owner.address, 1, 0, 0, true, 0, "", "");
+    expect(await registry.birthTimestampOf(3)).to.equal(0n);
     const future = (await networkHelpers.time.latest()) + 1000;
     await expect(registry.register(owner.address, 1, 0, 0, true, future, "", ""))
       .to.be.revertedWith("Birth cannot be in the future");
@@ -262,7 +263,9 @@ describe("Revised lineage definitions", function () {
       await expect(registry.burn(parent)).to.be.revertedWith("Token has offspring");
       await registry.burn(3);
       expect(await registry.offspringCount(parent)).to.equal(0n);
-      expect((await registry.getNodesBatch([3]))[0].birthTimestamp).to.equal(0n);
+      const [nodes, found] = await registry.getNodesBatch([3]);
+      expect(nodes[0].birthTimestamp).to.equal(0n);
+      expect(found).to.deep.equal([false]);
       await registry.register(owner.address, 1, 0, 0, true, 200, "", "");
       expect(await registry.ownerOf(4)).to.equal(owner.address); // burned ID is never reused
     });
@@ -390,6 +393,7 @@ describe("Revised lineage definitions", function () {
     const core = await ethers.deployContract("BenchCore");
     const coreId = await interfaceId("ILineageRegistry");
     expect(coreId).not.to.equal("0xfc68eb2e"); // nextTokenId is no longer standard
+    expect(coreId).not.to.equal("0x8911a112"); // nodeExists distinguishes this signed-date revision
     for (const id of [coreId, "0x80ac58cd", "0x01ffc9a7"]) {
       expect(await registry.supportsInterface(id)).to.equal(true);
       expect(await core.supportsInterface(id)).to.equal(true);
@@ -399,7 +403,7 @@ describe("Revised lineage definitions", function () {
       expect(await registry.supportsInterface(id)).to.equal(true);
       expect(await core.supportsInterface(id)).to.equal(false);
     }
-    for (const id of ["0xfc68eb2e", "0xffffffff", "0x00000000"]) {
+    for (const id of ["0xfc68eb2e", "0x8911a112", "0xffffffff", "0x00000000"]) {
       expect(await registry.supportsInterface(id)).to.equal(false);
     }
   });

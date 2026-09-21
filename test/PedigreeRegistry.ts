@@ -103,7 +103,7 @@ describe("LineageRegistry (core)", function () {
 
   describe("birth dates and chronology", function () {
     it("records the birth date in the node itself");
-    it("requires a birth date");
+    it("accepts zero as a valid birth date at the Unix epoch");
     it("rejects a birth date in the future");
     it("rejects a sire born after the offspring");
     it("rejects a dam born after the offspring");
@@ -131,7 +131,7 @@ describe("LineageRegistry (core)", function () {
   describe("views", function () {
     it("getParents reverts for a token that does not exist");
     it("getNode returns sire, dam, birth date and sex in one call");
-    it("getNodesBatch zero-fills tokens that do not exist rather than reverting");
+    it("getNodesBatch returns zero-filled absent records with explicit existence flags");
     it("isMale reverts for a token that does not exist");
     it("walks a three-generation pedigree breadth-first with getNodesBatch");
   });

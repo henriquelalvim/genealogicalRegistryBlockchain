@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/token/ERC721/ERC721.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import "./interfaces/ILineageRegistry.sol";
 
@@ -65,17 +66,16 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
     /// @param sireId         Father's local token ID, or 0 if unrecorded.
     /// @param damId          Mother's local token ID, or 0 if unrecorded.
     /// @param isMale_        This token's sex.
-    /// @param birthTimestamp Birth in Unix seconds. Required, and may not be in the future.
+    /// @param birthTimestamp Signed Unix seconds: negative before 1970, zero at the epoch. Not future-dated.
     /// @return tokenId       The newly minted token.
     function _registerNode(
         address to,
         uint256 sireId,
         uint256 damId,
         bool isMale_,
-        uint64 birthTimestamp
+        int64 birthTimestamp
     ) internal virtual returns (uint256 tokenId) {
-        require(birthTimestamp != 0, "Birth timestamp required");
-        require(birthTimestamp <= block.timestamp, "Birth cannot be in the future");
+        require(int256(birthTimestamp) <= SafeCast.toInt256(block.timestamp), "Birth cannot be in the future");
 
         tokenId = _nextTokenId++;
 
@@ -113,7 +113,7 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
 
     /// @dev Checks only supplied parents. Chronology also rejects self-parenting and any cycle;
     ///      all extensions must preserve it for every edge they add or rewrite.
-    function _requireValidParents(uint256 sireId, uint256 damId, uint64 offspringBirth)
+    function _requireValidParents(uint256 sireId, uint256 damId, int64 offspringBirth)
         internal
         view
         virtual
@@ -240,7 +240,7 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
     }
 
     /// @inheritdoc ILineageRegistry
-    function birthTimestampOf(uint256 tokenId) external view exists(tokenId) returns (uint64) {
+    function birthTimestampOf(uint256 tokenId) external view exists(tokenId) returns (int64) {
         return _nodes[tokenId].birthTimestamp;
     }
 
@@ -256,11 +256,21 @@ abstract contract LineageRegistry is ILineageRegistry, ERC721 {
     }
 
     /// @inheritdoc ILineageRegistry
-    function getNodesBatch(uint256[] calldata tokenIds) external view returns (Node[] memory nodes) {
-        nodes = new Node[](tokenIds.length);
+    function nodeExists(uint256 tokenId) public view returns (bool) {
+        return _ownerOf(tokenId) != address(0);
+    }
 
+    /// @inheritdoc ILineageRegistry
+    function getNodesBatch(uint256[] calldata tokenIds)
+        external
+        view
+        returns (Node[] memory nodes, bool[] memory found)
+    {
+        nodes = new Node[](tokenIds.length);
+        found = new bool[](tokenIds.length);
         for (uint256 i = 0; i < tokenIds.length; i++) {
-            nodes[i] = _nodes[tokenIds[i]];
+            found[i] = nodeExists(tokenIds[i]);
+            if (found[i]) nodes[i] = _nodes[tokenIds[i]];
         }
     }
 

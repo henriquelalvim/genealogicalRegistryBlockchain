@@ -23,7 +23,7 @@ import "../modules/LineageRegistryBurnable.sol";
 contract BenchCore is LineageRegistry {
     constructor() ERC721("Bench", "B") {}
 
-    function register(address to, uint256 sireId, uint256 damId, bool isMale_, uint64 birth)
+    function register(address to, uint256 sireId, uint256 damId, bool isMale_, int64 birth)
         external
         returns (uint256)
     {
@@ -35,7 +35,7 @@ contract BenchCore is LineageRegistry {
 contract BenchOffspring is LineageRegistryOffspring {
     constructor() ERC721("Bench", "B") {}
 
-    function register(address to, uint256 sireId, uint256 damId, bool isMale_, uint64 birth)
+    function register(address to, uint256 sireId, uint256 damId, bool isMale_, int64 birth)
         external
         returns (uint256)
     {
@@ -47,7 +47,7 @@ contract BenchOffspring is LineageRegistryOffspring {
 contract BenchLate is LineageRegistryOffspring, LineageRegistryLateParentage {
     constructor() ERC721("Bench", "B") {}
 
-    function register(address to, uint256 sireId, uint256 damId, bool isMale_, uint64 birth)
+    function register(address to, uint256 sireId, uint256 damId, bool isMale_, int64 birth)
         external
         returns (uint256)
     {
@@ -79,7 +79,7 @@ contract BenchFull is
 {
     constructor() ERC721("Bench", "B") {}
 
-    function register(address to, uint256 sireId, uint256 damId, bool isMale_, uint64 birth)
+    function register(address to, uint256 sireId, uint256 damId, bool isMale_, int64 birth)
         external
         returns (uint256)
     {

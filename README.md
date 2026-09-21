@@ -11,10 +11,11 @@ The reference composition is intended for pedigree animals with this reproductio
 
 > **Review revision, 2026-09-21.** Partial parentage and transfer-scoped consent are implemented;
 > late attachment now relies on strict chronology without walking ancestors. Core interface ID
-> changed to `0x8911a112`. Existing deployments retain their old behavior. See the
+> changed to `0x63add18e`. Existing deployments retain their old behavior. See the
 > [decision review](docs/decision-review.md) and [forum update draft](docs/forum-update.md).
-> Validation: 36 active regression tests pass; the original 100 pending specs remain a coverage
-> backlog. Merge scalability, historical/uncertain dates and correction history remain open.
+> Validation: 52 active regression tests pass; the original 100 pending specs remain a coverage
+> backlog. Signed historical dates are supported; merge scalability and uncertain dates remain open. Recorded parentage is
+> permanent: an incorrect assertion cannot be replaced through a correction API.
 
 ---
 
@@ -51,7 +52,7 @@ Four facts, three storage slots:
 struct Node {
     uint256 sireId;         // slot 0 — the father, or 0
     uint256 damId;          // slot 1 — the mother, or 0
-    uint64  birthTimestamp; // slot 2 ─┐ packed together
+    int64   birthTimestamp; // slot 2 ─┐ packed together
     bool    isMale;         // slot 2 ─┘
 }
 ```
@@ -59,6 +60,22 @@ struct Node {
 Folding the birth date into the node rather than a side mapping is what makes dates nearly free:
 the slot holding `isMale` is written at registration anyway, and a parent's date is read from a
 slot the sex check has already warmed. A **founder** writes exactly one slot.
+
+### Historical dates and existence
+
+Births and death records use **signed `int64` Unix seconds**. Negative timestamps represent dates
+before 1970-01-01T00:00:00Z, and zero represents that instant. The negative range extends roughly
+292 billion years before 1970. Dates remain immutable and cannot be in the future; signed
+comparisons preserve strict parent-before-child chronology across the epoch. Convert historical
+source calendars off-chain to UTC/proleptic Gregorian and preserve source details in metadata.
+Unknown or approximate dates are not represented by any special timestamp.
+
+Zero is no longer an absence marker. `nodeExists(id)` checks whether a token is live.
+`getNodesBatch(ids)` now returns `(Node[] nodes, bool[] found)`, with matching lengths and input
+order; inspect `found[i]`, not the date, to distinguish a live female founder born at zero from an
+absent record. Absent nodes are zero-filled; empty input returns two empty arrays.
+`Animal.deathRecorded` distinguishes no death record from a recorded death at timestamp zero.
+The flag is packed with the signed death date, and merges preserve/adopt the flag with its date.
 
 ### Independently optional parentage
 
@@ -100,7 +117,23 @@ An owner never needs a grant to name their own tokens. Child-side consent lives 
 ERC-721 operator approvals do not confer parentage permission. Revoking permission affects new
 edges only; completing the other slot does not require renewed consent for an existing edge.
 Ownership generations invalidate grants in constant time, with no linker enumeration. Indexers
-must treat ownership-changing `Transfer` events as grant invalidations.
+must treat ownership-changing `Transfer` events as grant invalidations. The recipient does not
+need to revoke the previous owner's per-token grants manually.
+
+Measured with `npx hardhat run scripts/bench-consent.ts` (Solidity 0.8.28, optimizer 200 runs):
+
+| Active grants before transfer | First ownership change | Transfer back |
+| --- | ---: | ---: |
+| None | 77,551 gas | 60,451 gas |
+| 1 parent + 1 child grant | 77,551 gas | 60,451 gas |
+| 32 parent + 32 child grants | 77,551 gas | 60,451 gas |
+
+These are complete `transferFrom` transaction costs for the reference composition between two
+EOAs, with one token initially owned by the sender and none by the receiver. They are not the
+incremental cost of invalidation, and other balances or receiver callbacks can change totals.
+The first ownership change initializes the generation counter; the return transfer updates it.
+Grant count does not affect the measured transfer cost, and every old grant remains invalid after
+the return. The benchmark verifies both parent and child permissions in each scenario.
 
 `canUseAsParent(parentTokenId, caller)` takes the caller as an **argument** rather than reading
 `msg.sender`, so another contract can ask the question on a third party's behalf. That is a
@@ -112,7 +145,7 @@ deliberate seam; see [Cross-registry linking](#cross-registry-linking).
 
 | Module | Adds | Requires | ERC-165 ID |
 | --- | --- | --- | --- |
-| *(core)* `ILineageRegistry` | the node, optional parents, dates, consent | — | `0x8911a112` |
+| *(core)* `ILineageRegistry` | the node, optional parents, dates, consent | — | `0x63add18e` |
 | `Offspring` | reverse index: `getOffspring`, `offspringCount` | — | `0x698afb25` |
 | `LateParentage` | `attachParentage`, child-side consent | — | `0x311f6e23` |
 | `Mergeable` | merge primitive + `mergedInto` tombstone | `Offspring` | `0x4205c309` |
@@ -121,13 +154,16 @@ deliberate seam; see [Cross-registry linking](#cross-registry-linking).
 Also required: ERC-721 (`0x80ac58cd`) and ERC-165 (`0x01ffc9a7`).
 
 IDs are computed from the interfaces and tested against locally deployed compositions. Reproduce
-with `npx hardhat run scripts/interface-ids.ts`. They are not frozen. The old core ID `0xfc68eb2e`
-is no longer advertised; optional IDs are unchanged, although their documented semantics changed.
+with `npx hardhat run scripts/interface-ids.ts`. They are not frozen. The old core IDs `0xfc68eb2e`
+and `0x8911a112` are no longer advertised. Adding `nodeExists(uint256)` changes the core ID for
+this signed-date revision; optional IDs are unchanged. Return-type changes alone do not change
+function selectors: clients must check the revised core ID and use the new ABI for signed dates,
+batch existence results and the domain death flag. Birth/death event signatures also changed.
 
 ### `Offspring`
 
 Core stores parentage on the child. This module adds downward queries with a reverse index, adding
-about 88,814 gas for a two-parent registration in the benchmark below. Each edge updates an array's
+about 88,792 gas for a two-parent registration in the benchmark below. Each edge updates an array's
 length and stores an element. A one-parent record adds only its one known reverse edge.
 
 The graph is reconstructible from events: `ParentageLinked` contains the complete resulting pair,
@@ -185,21 +221,23 @@ Measured on the reference stacks in `contracts/bench/`, optimizer at 200 runs. R
 
 | Stack | Deployed bytecode | `register` founder | `register` 2 parents |
 | --- | ---: | ---: | ---: |
-| core only | 8,313 | 99,251 | 139,131 |
-| + `Offspring` | 8,813 | 99,296 | 227,945 |
-| + `LateParentage` | 9,457 | 99,296 | 227,984 |
-| + `Mergeable`, `Burnable` | 12,185 | 99,274 | 227,962 |
-| **`PedigreeRegistry`** | **19,908** | **138,355** | **267,043** |
+| core only | 8,538 | 99,264 | 139,116 |
+| + `Offspring` | 9,034 | 99,287 | 227,908 |
+| + `LateParentage` | 9,678 | 99,287 | 227,947 |
+| + `Mergeable`, `Burnable` | 12,387 | 99,287 | 227,947 |
+| **`PedigreeRegistry`** | **20,119** | **138,483** | **267,143** |
 
 Measured for this review revision with Solidity 0.8.28, optimizer at 200 runs. Small calldata
 zero-byte differences in the block-derived birth timestamp can change gas between runs. The two
 parents in this benchmark have no prior offspring; later array appends can have different costs.
+This workload uses positive modern dates. Negative int64 values are sign-extended in calldata,
+so historical-date transactions can have a different calldata gas cost.
 
-The reverse index adds 88,814 gas over core on this workload. Core-only registration is about
+The reverse index adds 88,792 gas over core on this workload. Core-only registration is about
 48% cheaper than the full domain composition; deployed bytecode is about 58% smaller. LateParentage
 adds functionality without a material registration cost. Compared with the earlier revision,
-core two-parent registration changed from 138,516 to 139,131 gas and the full domain composition
-from 266,415 to 267,043 gas. These measurements are local and do not update the old deployment.
+core two-parent registration changed from 138,516 to 139,116 gas and the full domain composition
+from 266,415 to 267,143 gas. These measurements are local and do not update the old deployment.
 
 ---
 
@@ -315,7 +353,7 @@ Install only what you need:
 contract MyRegistry is LineageRegistryOffspring, LineageRegistryLateParentage {
     constructor() ERC721("My Registry", "MYR") {}
 
-    function register(address to, uint256 sireId, uint256 damId, bool isMale_, uint64 birth)
+    function register(address to, uint256 sireId, uint256 damId, bool isMale_, int64 birth)
         external returns (uint256)
     {
         return _registerNode(to, sireId, damId, isMale_, birth);
@@ -342,10 +380,13 @@ The compiler tells you which, and `contracts/bench/BenchStacks.sol` shows both c
 
 ### Testing
 
-`npx hardhat test` runs **36 active regression tests** in `test/LineageDecisions.ts`. They cover
+`npx hardhat test` runs **52 active regression tests** in `test/LineageDecisions.ts` and
+`test/HistoricalDates.ts`. They cover
 partial registration and attachment, consent invalidation (including round trips), full event
 reconstruction, partial merge reconciliation, burn cleanup, breed rules and interface discovery.
-A 64-generation pedigree exercises attachment without an ancestry walk.
+A 64-generation pedigree exercises attachment without an ancestry walk. Historical regressions
+cover 1800s records, signed limits, epoch-zero existence/death, cross-epoch chronology, and signed
+merge/death behavior.
 
 `test/PedigreeRegistry.ts` preserves the original **100 pending specs** as a broader coverage
 backlog. Hardhat's final aggregate includes pending entries; use Mocha's passing/pending counts
@@ -356,10 +397,14 @@ Run `npm run typecheck` for compilation and TypeScript checking.
 
 - **Merge scalability:** ancestor-policy walks, child rewrites and offspring removal scans remain
   unbounded. Leaf burns can also scan large parent offspring lists. No new depth cap was added.
-- **Dates:** positive `uint64` Unix seconds exclude pre-1970 dates and cannot express unknown or
-  approximate birth dates. A new representation needs an explicit chronology policy.
-- **Corrections:** ordinary parent slots, dates and sex cannot be corrected. Merge rejects
-  conflicting known parents; auditable supersession remains a design question.
+- **Uncertain dates:** signed int64 supports historical dates, but does not express unknown,
+  year-only or approximate birth evidence. Those require an explicit precision/chronology policy.
+- **Permanent assertions (settled policy):** recorded parents cannot be corrected or superseded
+  through a correction API. An incorrect parent remains an incorrect recorded assertion, with
+  consequences for descendants; responsibility lies with those authorizing the record. Filling
+  an unknown slot remains allowed. Merge may reconcile duplicate identities but rejects conflicting
+  known parents; it is not a correction mechanism. Optional leaf burn remains explicitly supported.
+  Dates and sex also remain immutable in the current implementation.
 - **Federation:** references are local. Separate attestations/indexers are the proposed next step;
   mirrors and widened references remain unimplemented. Local acyclicity does not prove acyclicity
   after records from multiple registries are identified as the same animal.
@@ -369,7 +414,7 @@ Run `npm run typecheck` for compilation and TypeScript checking.
 - **Compatibility:** interface semantics and the core ID changed. Existing contracts are not
   upgraded by these source changes; clients must distinguish the earlier deployment.
 - **Sex:** known male/female remains required; unknown sex and other reproduction models are out
-  of scope. Missing scalar node reads revert; missing batch records are zero-filled.
+  of scope. Missing scalar node reads revert; batch records include explicit existence flags.
 - **Interfaces are not frozen**, and revert strings remain intentional during review.
 
 ## Roadmap
@@ -379,8 +424,10 @@ Run `npm run typecheck` for compilation and TypeScript checking.
 - [x] Invalidate token grants and merge offers on ownership changes
 - [x] Specify missing-record reads and recompute core's ERC-165 ID
 - [ ] Complete the broader test backlog
-- [ ] Define scalable merge reconciliation and historical/uncertain dates
-- [ ] Define auditable correction and federation semantics
+- [x] Support historical signed dates and explicit existence/death indicators
+- [ ] Define scalable merge reconciliation and uncertain dates
+- [x] Keep recorded parentage permanent; no correction/supersession API
+- [ ] Define federation semantics
 - [ ] Freeze the interfaces and submit as an ERC
 
 ## Branches

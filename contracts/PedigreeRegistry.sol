@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import "@openzeppelin/contracts/access/AccessControl.sol";
+import "@openzeppelin/contracts/utils/math/SafeCast.sol";
 
 import "./modules/LineageRegistryLateParentage.sol";
 import "./modules/LineageRegistryMergeable.sol";
@@ -97,7 +98,8 @@ contract PedigreeRegistry is
         uint256 breedId;
         string name;
         string externalRef; // studbook number, microchip, passport — free-form on purpose
-        uint64 deathTimestamp; // 0 = alive or unrecorded
+        int64 deathTimestamp; // Signed Unix seconds; zero is a valid recorded date.
+        bool deathRecorded; // Separates an unrecorded death from a death at the Unix epoch.
     }
 
     // ──────────────────────────── Storage ────────────────────────────
@@ -133,9 +135,9 @@ contract PedigreeRegistry is
         uint256 sireId,
         uint256 damId,
         bool isMale,
-        uint64 birthTimestamp
+        int64 birthTimestamp
     );
-    event DeathRecorded(uint256 indexed tokenId, uint64 deathTimestamp);
+    event DeathRecorded(uint256 indexed tokenId, int64 deathTimestamp);
     event MergeProposed(uint256 indexed survivorId, uint256 indexed duplicateId, address indexed proposer);
     event MergeProposalCancelled(uint256 indexed survivorId, uint256 indexed duplicateId);
     event AnimalMerged(uint256 indexed survivorId, uint256 indexed duplicateId);
@@ -210,7 +212,7 @@ contract PedigreeRegistry is
         uint256 sireId,
         uint256 damId,
         bool isMale_,
-        uint64 birthTimestamp,
+        int64 birthTimestamp,
         string calldata name_,
         string calldata externalRef
     ) external breedExists(breedId) returns (uint256 tokenId) {
@@ -221,7 +223,7 @@ contract PedigreeRegistry is
         tokenId = _registerNode(to, sireId, damId, isMale_, birthTimestamp);
 
         _animals[tokenId] =
-            Animal({breedId: breedId, name: name_, externalRef: externalRef, deathTimestamp: 0});
+            Animal({breedId: breedId, name: name_, externalRef: externalRef, deathTimestamp: 0, deathRecorded: false});
 
         emit AnimalRegistered(tokenId, breedId, to, sireId, damId, isMale_, birthTimestamp);
     }
@@ -253,15 +255,15 @@ contract PedigreeRegistry is
     /// @dev    A deceased animal remains a usable parent: posthumous offspring via stored semen
     ///         or embryo transfer are routine, and the only temporal rule that matters is that a
     ///         parent was *born* before its offspring.
-    function recordDeath(uint256 tokenId, uint64 deathTimestamp) external isTokenOwner(tokenId) {
+    function recordDeath(uint256 tokenId, int64 deathTimestamp) external isTokenOwner(tokenId) {
         Animal storage a = _animals[tokenId];
 
-        require(a.deathTimestamp == 0, "Death already recorded");
-        require(deathTimestamp > 0, "Death timestamp required");
-        require(deathTimestamp <= block.timestamp, "Death cannot be in the future");
+        require(!a.deathRecorded, "Death already recorded");
+        require(int256(deathTimestamp) <= SafeCast.toInt256(block.timestamp), "Death cannot be in the future");
         require(deathTimestamp >= _nodes[tokenId].birthTimestamp, "Death precedes birth");
 
         a.deathTimestamp = deathTimestamp;
+        a.deathRecorded = true;
         emit DeathRecorded(tokenId, deathTimestamp);
     }
 
@@ -345,7 +347,10 @@ contract PedigreeRegistry is
 
         if (bytes(survivor.name).length == 0) survivor.name = duplicate.name;
         if (bytes(survivor.externalRef).length == 0) survivor.externalRef = duplicate.externalRef;
-        if (survivor.deathTimestamp == 0) survivor.deathTimestamp = duplicate.deathTimestamp;
+        if (!survivor.deathRecorded && duplicate.deathRecorded) {
+            survivor.deathTimestamp = duplicate.deathTimestamp;
+            survivor.deathRecorded = true;
+        }
 
         delete _animals[duplicateId];
         delete _mergeProposal[duplicateId];
@@ -397,7 +402,7 @@ contract PedigreeRegistry is
     }
 
     function isDeceased(uint256 tokenId) external view exists(tokenId) returns (bool) {
-        return _animals[tokenId].deathTimestamp != 0;
+        return _animals[tokenId].deathRecorded;
     }
 
     /// @notice Live proposed survivor, or zero for absent, burned or ownership-invalidated offers.

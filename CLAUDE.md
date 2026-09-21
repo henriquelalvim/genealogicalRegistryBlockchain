@@ -58,8 +58,10 @@ contracts/bench/BenchStacks.sol          minimal stacks used only by scripts/ben
 2. **Independently optional slots:** zero means unrecorded. A founder has both slots zero; one
    documented parent needs no fabricated placeholder. Ordinary writes fill each slot at most once.
 3. **Local, existing parents:** a supplied parent must exist in this registry at edge creation.
-4. **Immutable chronology:** reported birth dates are nonzero, not future-dated at creation, and
-   each parent is strictly older than its child. Historical/uncertain date support is still open.
+4. **Immutable chronology:** birth and death dates are signed int64 Unix seconds, with negative
+   dates before 1970 and zero at the epoch. Dates are not future-dated at creation, and each parent
+   is strictly older than its child. Unknown/approximate date support is still open. Compare to
+   block.timestamp without narrowing: int256(date) against SafeCast.toInt256(block.timestamp).
 5. **Consent:** every newly supplied parent requires its current owner's permission. Completing
    the other slot does not re-check old edges. ERC-721 approvals do not grant lineage permission.
 6. **Identity:** zero IDs are reserved and IDs never reused. Sequential allocation remains an
@@ -74,6 +76,20 @@ reconciles each slot separately and emits the complete pair for each changed nod
 Per-token parent/child grants and merge proposals are bound to _ownershipEpoch. Ownership changes
 and burns invalidate them, including transfer away and back; self-transfers preserve them. Blanket
 grants continue to follow the owner. Indexers observe invalidation through Transfer events.
+
+Birth timestamp zero is a valid date. `nodeExists` reports live-token existence, and `getNodesBatch`
+returns parallel `(nodes, found)` arrays. Never infer existence from a date. `Animal.deathRecorded`
+is explicit, packed with deathTimestamp, and must travel with that timestamp during merges. There
+is no timestamp sentinel for unknown dates. Updating outputs alone does not change ERC-165 IDs;
+the added nodeExists selector distinguishes the signed-date core revision (`0x63add18e`).
+
+### Permanence is a settled decision
+
+Recorded parentage has no correction or supersession API. Incorrect assertions remain part of the
+record; do not add an administrative edit path or propose correction history as an open requirement.
+Late attachment only fills unknown slots. Merge remains the explicit identity-reconciliation
+exception and must reject conflicting known parents; it cannot be used to choose a replacement
+sire/dam. Existing optional leaf-burn semantics are unchanged.
 
 ### Acyclicity follows from chronology
 
@@ -112,7 +128,7 @@ every path passes through an overrider, naming core is redundant and the compile
 
 ### Storage packing is intentional
 
-`Node` is three slots: `sireId`, `damId`, and `birthTimestamp` (`uint64`) + `isMale` (`bool`)
+`Node` is three slots: `sireId`, `damId`, and `birthTimestamp` (`int64`) + `isMale` (`bool`)
 packed together. The birth date lives in the node rather than a side mapping precisely because
 that slot is written at registration anyway, and a parent's date is then read from a slot the sex
 check already warmed. A founder writes exactly one slot. **Do not widen these fields casually** —
@@ -132,7 +148,8 @@ it silently costs an `SSTORE` per registration.
 
 - **Hardhat 3 + ESM.** Tests and scripts use `await network.create()` at top level, **not** the
   deprecated `network.connect()`.
-- **Tests:** `test/LineageDecisions.ts` contains active behavioral regressions for the revision.
+- **Tests:** `test/LineageDecisions.ts` and `test/HistoricalDates.ts` contain active behavioral
+  regressions for the revision, including signed dates and zero-valued birth/death records.
   `test/PedigreeRegistry.ts` preserves 100 pending coverage-backlog specs. Do not delete pending
   specs to make output cleaner. Hardhat's aggregate includes pending entries; report Mocha's
   actual passing/pending counts. Graph and authorization changes need meaningful regressions.
